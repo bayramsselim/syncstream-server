@@ -1,7 +1,12 @@
 /**
  * SyncStream Pro - Page Context Fullscreen Intercept
- * Runs in MAIN world at document_start (before any site scripts).
- * Redirects requestFullscreen to document.body so ss-root stays visible.
+ * Runs in MAIN world at document_start.
+ *
+ * Strategy:
+ *   - TOP FRAME: do NOT intercept — let the site go fullscreen normally.
+ *     content.js fullscreenchange handler will move ss-root into the element.
+ *   - IFRAME: intercept and ask the top frame to go fullscreen on body instead,
+ *     so ss-root (child of body) remains visible. CSS expands the iframe.
  */
 (function () {
     if (window.__ssFullscreenPatched) return;
@@ -10,8 +15,7 @@
     const isActive   = () => document.documentElement.hasAttribute('data-ss-active');
     const isTopFrame = () => window === window.top;
 
-    // Capture originals BEFORE patching — used in requestBodyFullscreen to avoid
-    // calling the patched version (which would cause infinite recursion).
+    // Capture originals before any patching
     var originals = {};
     ['requestFullscreen', 'webkitRequestFullscreen', 'mozRequestFullScreen', 'msRequestFullscreen'].forEach(function (k) {
         if (HTMLElement.prototype[k]) originals[k] = HTMLElement.prototype[k];
@@ -24,38 +28,34 @@
         return Promise.reject(new Error('no fullscreen api'));
     }
 
-    // Patch each method
-    Object.keys(originals).forEach(function (k) {
-        var orig = originals[k];
-        HTMLElement.prototype[k] = function () {
-            if (!isActive()) return orig.apply(this, arguments);
-            if (isTopFrame()) {
-                return requestBodyFullscreen();
-            } else {
-                // Inside iframe: ask top frame to go fullscreen
+    // Only patch for IFRAME context — top frame gets normal fullscreen behaviour
+    if (!isTopFrame()) {
+        Object.keys(originals).forEach(function (k) {
+            var orig = originals[k];
+            HTMLElement.prototype[k] = function () {
+                if (!isActive()) return orig.apply(this, arguments);
+                // Ask top frame to go fullscreen so ss-root stays visible
                 try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch (_) {}
                 return Promise.resolve();
-            }
-        };
-    });
+            };
+        });
 
-    // webkitEnterFullscreen used by some Safari/mobile players
-    var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
-    if (origWEFS) {
-        HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
-            if (!isActive()) return origWEFS.apply(this, arguments);
-            if (isTopFrame()) requestBodyFullscreen();
-            else { try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch (_) {} }
-        };
+        var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
+        if (origWEFS) {
+            HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
+                if (!isActive()) return origWEFS.apply(this, arguments);
+                try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch (_) {}
+            };
+        }
     }
 
-    // Top frame: receive SS_FS_REQUEST from child iframe
+    // Top frame: receive SS_FS_REQUEST from a child iframe
     if (isTopFrame()) {
         window.addEventListener('message', function (e) {
             if (!e.data || e.data.type !== 'SS_FS_REQUEST') return;
             if (!isActive()) return;
 
-            // Mark the source iframe so CSS can expand it to fill the screen
+            // Mark the source iframe so CSS expands it to fill the viewport
             var marked = false;
             try {
                 var iframes = document.querySelectorAll('iframe');
@@ -66,7 +66,6 @@
                         break;
                     }
                 }
-                // Fallback: mark the largest iframe if source match failed
                 if (!marked && iframes.length) {
                     var largest = iframes[0];
                     for (var j = 1; j < iframes.length; j++) {

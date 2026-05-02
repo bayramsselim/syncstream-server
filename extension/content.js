@@ -962,6 +962,9 @@ function injectUI() {
             return;
         }
         if (fsEl.contains(root)) return;
+        // IFRAME case: content-main.js handles this via body fullscreen + CSS.
+        // Don't try to append ss-root to the iframe DOM element — it won't render.
+        if (fsEl.tagName === 'IFRAME') return;
         let target = fsEl;
         while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
         if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
@@ -1153,7 +1156,7 @@ function mainLoop() {
         if (root) {
             if (!fsEl && root.parentElement !== document.body) {
                 document.body.appendChild(root);
-            } else if (fsEl && !fsEl.contains(root)) {
+            } else if (fsEl && !fsEl.contains(root) && fsEl.tagName !== 'IFRAME') {
                 let target = fsEl;
                 while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
                 if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
