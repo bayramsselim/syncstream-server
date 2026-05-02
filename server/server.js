@@ -20,7 +20,12 @@ const MAX_JOIN_TRIES = 8;    // brute-force: max failed join attempts per connec
 
 function randomId()    { return Math.random().toString(36).substring(2, 9); }
 function randomColor() { return `hsl(${Math.floor(Math.random() * 360)},70%,75%)`; }
-function randomRoomId(){ return Math.random().toString(36).substring(2, 8).toUpperCase(); }
+function randomRoomId() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let id = '';
+    for (let i = 0; i < 6; i++) id += chars[Math.floor(Math.random() * chars.length)];
+    return id;
+}
 
 wss.on('connection', (ws) => {
     ws.id          = randomId();

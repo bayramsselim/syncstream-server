@@ -34,8 +34,10 @@ const ICE_SERVERS  = {
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun4.l.google.com:19302' },
-        { urls: 'turn:openrelay.metered.ca:80',              username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443',             username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:freestun.net:3478',  username: 'free', credential: 'free' },
+        { urls: 'turns:freestun.net:5349', username: 'free', credential: 'free' },
+        { urls: 'turn:openrelay.metered.ca:80',               username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443',              username: 'openrelayproject', credential: 'openrelayproject' },
         { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
     ]
 };
@@ -163,7 +165,16 @@ async function createPeer(tid, name) {
     pc.onicecandidate = ({ candidate }) => {
         if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { candidate } });
     };
-    pc.ontrack = (event) => { const s = event.streams[0]; if (s) addVideoTile(tid, s, name); };
+    pc.ontrack = (event) => {
+        const stream = event.streams[0] || (() => {
+            // streams[0] can be empty when track added without explicit stream — create one
+            const ms = peerConnections[tid]?._remoteStream || new MediaStream();
+            ms.addTrack(event.track);
+            if (peerConnections[tid]) peerConnections[tid]._remoteStream = ms;
+            return ms;
+        })();
+        addVideoTile(tid, stream, name);
+    };
     pc.onnegotiationneeded = async () => {
         try {
             pObj.makingOffer = true;
