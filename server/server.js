@@ -134,6 +134,14 @@ wss.on('connection', (ws) => {
                 broadcastRoomUpdate(ws.roomId);
             }
 
+            else if (data.type === 'HOST_NAVIGATE') {
+                const room = rooms.get(ws.roomId);
+                if (room.hostControlOnly && ws.id !== room.host) return;
+                const url   = (data.url   || '').substring(0, 2000);
+                const title = (data.title || '').substring(0, 200);
+                broadcastToRoom(ws.roomId, { type: 'HOST_NAVIGATE', url, title, username: ws.username }, ws);
+            }
+
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 const room = rooms.get(ws.roomId);
                 room.nowPlaying    = (data.title || '').substring(0, 200);

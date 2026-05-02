@@ -2,6 +2,7 @@ let socket = null;
 let currentRoom = null;
 let reconnectTimer = null;
 let isConnecting = false;
+let contentTabId = null; // tab where content script is active
 
 const SERVER_URL = 'wss://syncstream-server.onrender.com';
 
@@ -94,8 +95,24 @@ function broadcastToPopup(msg) {
     chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
+// ─── TAB NAVIGATION DETECTION ─────────────────────────────────────────────────
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    if (tabId !== contentTabId || !changeInfo.url || !currentRoom?.roomId) return;
+    const canNavigate = currentRoom.isHost || !currentRoom.hostControlOnly;
+    if (!canNavigate) return;
+    if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({
+            type: 'HOST_NAVIGATE',
+            roomId: currentRoom.roomId,
+            url: changeInfo.url,
+            title: tab.title || ''
+        }));
+    }
+});
+
 // ─── MESSAGE HANDLER ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    if (sender?.tab?.id) contentTabId = sender.tab.id;
     if (request.type === 'GET_ROOM_STATE') {
         sendResponse(currentRoom);
     }

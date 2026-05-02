@@ -67,6 +67,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'NOW_PLAYING')   { const el = document.getElementById('ss-np-title'); if (el) el.textContent = msg.title; }
     else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
     else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
+    else if (msg.type === 'HOST_NAVIGATE') showNavigateToast(msg.url, msg.title, msg.username);
 });
 
 // ─── VIDEO SYNC ───────────────────────────────────────────────────────────────
@@ -555,6 +556,61 @@ function showReconnectToast(sec) {
     const update = () => { t.textContent = `⚡ Bağlantı kesildi — ${s}s sonra yeniden bağlanıyor...`; };
     update();
     t._timer = setInterval(() => { s--; if (s <= 0) { clearInterval(t._timer); t.remove(); } else update(); }, 1000);
+}
+
+// ─── NAVIGATE TOAST ───────────────────────────────────────────────────────────
+function showNavigateToast(url, title, username) {
+    if (!url || window.location.href === url) return;
+
+    let t = document.getElementById('ss-nav-toast');
+    if (t) { clearInterval(t._timer); t.remove(); }
+
+    t = document.createElement('div');
+    t.id = 'ss-nav-toast';
+    t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(6,6,14,0.97);color:#fff;padding:14px 18px;border-radius:16px;font-size:13px;z-index:2147483646;border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.65);display:flex;flex-direction:column;gap:10px;min-width:300px;max-width:420px;pointer-events:auto;';
+
+    const top = document.createElement('div');
+    top.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px;color:#aaa;';
+    top.innerHTML = `<span style="font-size:18px;">🎬</span><span><b style="color:#fff;">${username || 'Host'}</b> yeni bir videoya geçiyor</span>`;
+
+    const titleEl = document.createElement('div');
+    titleEl.style.cssText = 'font-size:12px;color:#818cf8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    titleEl.textContent = title || url;
+
+    const bottom = document.createElement('div');
+    bottom.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
+
+    const countdown = document.createElement('span');
+    countdown.style.cssText = 'font-size:11px;color:#555;flex:1;';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'İptal';
+    cancelBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:background 0.15s;flex-shrink:0;';
+    cancelBtn.onmouseenter = () => { cancelBtn.style.background = 'rgba(255,255,255,0.16)'; };
+    cancelBtn.onmouseleave = () => { cancelBtn.style.background = 'rgba(255,255,255,0.08)'; };
+
+    const goBtn = document.createElement('button');
+    goBtn.textContent = 'Şimdi Geç';
+    goBtn.style.cssText = 'background:#6366f1;border:none;color:#fff;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s;flex-shrink:0;';
+    goBtn.onmouseenter = () => { goBtn.style.background = '#4f46e5'; };
+    goBtn.onmouseleave = () => { goBtn.style.background = '#6366f1'; };
+
+    bottom.appendChild(countdown);
+    bottom.appendChild(cancelBtn);
+    bottom.appendChild(goBtn);
+    t.appendChild(top);
+    t.appendChild(titleEl);
+    t.appendChild(bottom);
+    document.body.appendChild(t);
+
+    let s = 5;
+    const update = () => { countdown.textContent = `${s}s sonra otomatik geçilecek`; };
+    update();
+
+    const navigate = () => { clearInterval(t._timer); t.remove(); window.location.href = url; };
+    cancelBtn.onclick = (e) => { e.stopPropagation(); clearInterval(t._timer); t.remove(); };
+    goBtn.onclick     = (e) => { e.stopPropagation(); navigate(); };
+    t._timer = setInterval(() => { s--; if (s <= 0) navigate(); else update(); }, 1000);
 }
 
 // ─── NOTIFICATION SOUND ───────────────────────────────────────────────────────
