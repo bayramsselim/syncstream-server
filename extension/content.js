@@ -40,23 +40,29 @@ const ICE_SERVERS = {
 // Video Sync: in ALL frames (iframe players like dizigom)
 const IS_TOP_FRAME = (window === window.top);
 
-console.log(`[SyncStream] v5.1 loaded | top=${IS_TOP_FRAME} | ${location.hostname}`);
+// ─── UI PERMISSION GUARD ────────────────────────────────────────────────────────
+let canShowUI = false; // Only one frame per tab can show the UI
+console.log(`[SyncStream] v5.2 loading... ${location.hostname}`);
 
 // ─── INIT ──────────────────────────────────────────────────────────────────────
-// Only init WebRTC/peers from top frame to avoid duplicate connections
-if (IS_TOP_FRAME) {
-    chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-        if (chrome.runtime.lastError || !res) return;
-        roomState = res;
-        if (roomState.myId) initPeers();
-        if (roomState.isHost && videoElement) broadcastState();
-    });
-} else {
-    // In iframe: still need roomState for sync guard (hostControlOnly check)
-    chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-        if (!chrome.runtime.lastError && res) roomState = res;
-    });
-}
+chrome.runtime.sendMessage({ type: 'GET_UI_PERMISSION' }, (perm) => {
+    canShowUI = perm?.canShow || false;
+    console.log(`[SyncStream] UI Permission: ${canShowUI}`);
+
+    if (canShowUI) {
+        chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+            if (chrome.runtime.lastError || !res) return;
+            roomState = res;
+            if (roomState.myId) initPeers();
+            if (roomState.isHost && videoElement) broadcastState();
+        });
+    } else {
+        // In iframe: still need roomState for sync guard
+        chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+            if (!chrome.runtime.lastError && res) roomState = res;
+        });
+    }
+});
 
 // ─── VIDEO SYNC ────────────────────────────────────────────────────────────────
 function findMainVideo() {
@@ -511,8 +517,8 @@ chrome.runtime.onMessage.addListener((msg) => {
         return;
     }
 
-    // EVERYTHING ELSE (WebRTC, UI, Chat) is TOP FRAME ONLY
-    if (!IS_TOP_FRAME) return;
+    // EVERYTHING ELSE (WebRTC, UI, Chat) is for the UI Master ONLY
+    if (!canShowUI) return;
 
     switch (msg.type) {
         case 'CHAT_MESSAGE':
@@ -548,18 +554,18 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ─── MAIN LOOP (1s) ─────────────────────────────────────────────────────────────
 setInterval(() => {
-    // Only inject UI in top frame (prevents double dock in iframe sites)
-    if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
+    // Only inject UI in the Master frame (prevents double dock)
+    if (canShowUI && !document.getElementById('ss-root')) injectUI();
 
-    // Find video in ANY frame (iframe sites like dizigom need this)
+    // Find video in ANY frame (including iframes)
     if (videoElement && !document.body.contains(videoElement)) videoElement = null;
     if (!videoElement) {
         videoElement = findMainVideo();
-        if (videoElement) { console.log('[SyncStream] Video found in', location.hostname); attachSyncListeners(); }
+        if (videoElement) { console.log('[SyncStream] Video attached in', location.hostname); attachSyncListeners(); }
     }
 
-    // Keep remote conference videos alive (top frame only)
-    if (IS_TOP_FRAME) {
+    // Keep remote conference videos alive (Master frame only)
+    if (canShowUI) {
         document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
             if (v.id !== 'ss-v-local' && v.srcObject && v.paused) {
                 v.muted = false; v.volume = 1.0; v.play().catch(() => {});

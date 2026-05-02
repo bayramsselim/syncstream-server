@@ -3,6 +3,7 @@ let currentRoom = null;
 let reconnectTimer = null;
 
 const SERVER_URL = 'wss://syncstream-server.onrender.com';
+let uiMasters = new Map(); // tabId -> frameId (who is allowed to show UI)
 
 chrome.storage.local.get(['roomData'], (result) => {
     if (result.roomData) {
@@ -75,9 +76,24 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
     } else if (request.type === 'GET_ROOM_STATE') {
         sendResponse(currentRoom);
+    } else if (request.type === 'GET_UI_PERMISSION') {
+        const tabId = sender.tab.id;
+        const frameId = sender.frameId;
+        if (!uiMasters.has(tabId)) {
+            uiMasters.set(tabId, frameId);
+            sendResponse({ canShow: true });
+        } else {
+            sendResponse({ canShow: uiMasters.get(tabId) === frameId });
+        }
     }
     return true;
 });
+
+// Clear master when tab is closed or refreshed
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status === 'loading') uiMasters.delete(tabId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => uiMasters.delete(tabId));
 
 connectWebSocket();
 
