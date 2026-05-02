@@ -60,7 +60,8 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
         }
     } else if (IS_TOP_FRAME) {
         try {
-            const code = new URL(window.location.href).searchParams.get('ss_room');
+            const hash = window.location.hash;
+            const code = hash.match(/ss_room=([A-Z0-9]+)/i)?.[1];
             if (code) setTimeout(() => showJoinPrompt(code.toUpperCase()), 1500);
         } catch (_) {}
     }
@@ -165,16 +166,7 @@ async function createPeer(tid, name) {
     pc.onicecandidate = ({ candidate }) => {
         if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { candidate } });
     };
-    pc.ontrack = (event) => {
-        const stream = event.streams[0] || (() => {
-            // streams[0] can be empty when track added without explicit stream — create one
-            const ms = peerConnections[tid]?._remoteStream || new MediaStream();
-            ms.addTrack(event.track);
-            if (peerConnections[tid]) peerConnections[tid]._remoteStream = ms;
-            return ms;
-        })();
-        addVideoTile(tid, stream, name);
-    };
+    pc.ontrack = (event) => { const s = event.streams[0]; if (s) addVideoTile(tid, s, name); };
     pc.onnegotiationneeded = async () => {
         try {
             pObj.makingOffer = true;
@@ -182,23 +174,7 @@ async function createPeer(tid, name) {
             chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { description: pc.localDescription } });
         } catch (e) { console.error('[SS] Negotiation:', e); } finally { pObj.makingOffer = false; }
     };
-    pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'failed') pc.restartIce();
-    };
-    pc.onconnectionstatechange = () => {
-        const tile = document.getElementById(`ss-vid-${tid}`);
-        const sig  = tile?.querySelector('.ss-signal');
-        if (pc.connectionState === 'connected') {
-            if (sig) { sig.style.background = '#10b981'; sig.style.boxShadow = '0 0 5px #10b981'; sig.title = 'Good connection'; }
-        } else if (pc.connectionState === 'failed') {
-            if (sig) { sig.style.background = '#ef4444'; sig.style.boxShadow = '0 0 5px #ef4444'; sig.title = 'Connection failed'; }
-            // Attempt renegotiation by closing and recreating peer
-            pc.close();
-            delete peerConnections[tid];
-            const u = roomState?.users?.find(x => x.id === tid);
-            if (u) setTimeout(() => createPeer(tid, u.username), 2000);
-        }
-    };
+    pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     startStatsMonitor(tid, pc);
     return pObj;

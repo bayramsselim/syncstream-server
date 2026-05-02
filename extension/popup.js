@@ -52,8 +52,8 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         if (!tabs[0]?.url) return;
         try {
-            const url    = new URL(tabs[0].url);
-            const code   = url.searchParams.get('ss_room');
+            const hash = new URL(tabs[0].url).hash;
+            const code = hash.match(/ss_room=([A-Z0-9]+)/i)?.[1];
             if (code) el.joinCodeIn.value = code.toUpperCase();
         } catch (_) {}
     });
@@ -164,7 +164,7 @@ document.addEventListener('DOMContentLoaded', () => {
         chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
             try {
                 const url = new URL(tabs[0]?.url || '');
-                url.searchParams.set('ss_room', room.roomId);
+                url.hash = 'ss_room=' + room.roomId;
                 el.btnShare.dataset.link = url.toString();
             } catch (_) { el.btnShare.dataset.link = ''; }
         });
