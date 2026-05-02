@@ -1,24 +1,30 @@
 /**
- * SyncStream Pro - Content Script
- * UX: draggable dock + tiles, auto-hide dock, notification sound,
- *     unread badge, mute per-tile, smooth animations
+ * SyncStream Pro - Content Script v2.0
+ * Features: draggable dock/tiles, auto-hide, screen share, keyboard shortcuts,
+ *           sync indicator, volume slider, now playing, notification sound,
+ *           unread badge, perf-optimized interval
  */
 
-let videoElement = null;
-let isSyncing    = false;
-let roomState    = null;
-let localStream  = null;
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let videoElement    = null;
+let isSyncing       = false;
+let roomState       = null;
+let localStream     = null;
+let screenStream    = null;
 let peerConnections = {};
-let signalingQueue = [];
+let signalingQueue  = [];
 let processingSignaling = false;
 
-let isMicOn    = false;
-let isCamOn    = false;
-let isChatOpen = false;
-let unreadCount = 0;
+let isMicOn         = false;
+let isCamOn         = false;
+let isScreenSharing = false;
+let isChatOpen      = false;
+let unreadCount     = 0;
+let lastTitle       = '';
+let videoFound      = false; // slows interval after first attach
 
 const IS_TOP_FRAME = (window === window.top);
-const ICE_SERVERS = {
+const ICE_SERVERS  = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
@@ -27,12 +33,9 @@ const ICE_SERVERS = {
     ]
 };
 
-// ─── INITIALIZATION ───────────────────────────────────────────────────────────
+// ─── INIT ─────────────────────────────────────────────────────────────────────
 chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-    if (res) {
-        roomState = res;
-        if (IS_TOP_FRAME && roomState.myId) initPeers();
-    }
+    if (res) { roomState = res; if (IS_TOP_FRAME && roomState.myId) initPeers(); }
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -44,9 +47,10 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
     else if (msg.type === 'TOAST')         showToast(msg.message, msg.color);
+    else if (msg.type === 'NOW_PLAYING')   { const el = document.getElementById('ss-np-title'); if (el) el.textContent = msg.title; }
 });
 
-// ─── SYNC ─────────────────────────────────────────────────────────────────────
+// ─── VIDEO SYNC ───────────────────────────────────────────────────────────────
 function findMainVideo() {
     return Array.from(document.querySelectorAll('video'))
         .filter(v => v.offsetWidth > 100 && !v.id.startsWith('ss-v-'))
@@ -66,12 +70,25 @@ function applyRemoteSync(msg) {
     if (!videoElement) videoElement = findMainVideo();
     if (!videoElement) return;
     isSyncing = true;
+
+    // Show sync indicator with who triggered it
+    showSyncIndicator(msg.byUsername);
+
     const diff = Math.abs(videoElement.currentTime - msg.time);
     if (msg.event === 'seek' || diff > 1.2) videoElement.currentTime = msg.time;
     if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
     if (msg.event === 'play'  && videoElement.paused)  videoElement.play().catch(() => {});
     if (msg.event === 'pause' && !videoElement.paused) videoElement.pause();
     setTimeout(() => { isSyncing = false; }, 500);
+}
+
+function showSyncIndicator(byUser) {
+    const ind = document.getElementById('ss-sync-ind');
+    if (!ind) return;
+    ind.textContent = byUser ? `⟳ synced by ${byUser}` : '⟳ syncing...';
+    ind.style.opacity = '1';
+    clearTimeout(ind._t);
+    ind._t = setTimeout(() => { ind.style.opacity = '0'; }, 2000);
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
@@ -91,55 +108,43 @@ async function createPeer(tid, name) {
     pc.onicecandidate = ({ candidate }) => {
         if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { candidate } });
     };
-    pc.ontrack = (event) => {
-        const stream = event.streams[0];
-        if (stream) addVideoTile(tid, stream, name);
-    };
+    pc.ontrack = (event) => { const s = event.streams[0]; if (s) addVideoTile(tid, s, name); };
     pc.onnegotiationneeded = async () => {
         try {
             pObj.makingOffer = true;
             await pc.setLocalDescription();
             chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { description: pc.localDescription } });
-        } catch (e) { console.error('[SyncStream] Negotiation error:', e); }
-        finally { pObj.makingOffer = false; }
+        } catch (e) { console.error('[SS] Negotiation:', e); } finally { pObj.makingOffer = false; }
     };
     pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     return pObj;
 }
 
-function enqueueSignaling(fromId, payload) {
-    signalingQueue.push({ fromId, payload });
-    processQueue();
-}
+function enqueueSignaling(fromId, payload) { signalingQueue.push({ fromId, payload }); processQueue(); }
 
 async function processQueue() {
-    if (processingSignaling || signalingQueue.length === 0) return;
+    if (processingSignaling || !signalingQueue.length) return;
     processingSignaling = true;
     const { fromId, payload } = signalingQueue.shift();
     try {
         let p = peerConnections[fromId];
-        if (!p) {
-            const u = roomState?.users?.find(x => x.id === fromId);
-            p = await createPeer(fromId, u ? u.username : 'User');
-        }
+        if (!p) { const u = roomState?.users?.find(x => x.id === fromId); p = await createPeer(fromId, u?.username || 'User'); }
         if (payload.description) {
-            const offerCollision = (payload.description.type === 'offer') &&
-                                   (p.makingOffer || p.pc.signalingState !== 'stable');
-            if (offerCollision && !p.polite) { processingSignaling = false; processQueue(); return; }
+            const collision = payload.description.type === 'offer' && (p.makingOffer || p.pc.signalingState !== 'stable');
+            if (collision && !p.polite) { processingSignaling = false; processQueue(); return; }
             await p.pc.setRemoteDescription(payload.description);
             if (payload.description.type === 'offer') {
                 await p.pc.setLocalDescription();
                 chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: fromId, payload: { description: p.pc.localDescription } });
             }
-        } else if (payload.candidate) {
-            await p.pc.addIceCandidate(payload.candidate).catch(() => {});
-        }
-    } catch (e) { console.error('[SyncStream] Signaling error:', e); }
+        } else if (payload.candidate) { await p.pc.addIceCandidate(payload.candidate).catch(() => {}); }
+    } catch (e) { console.error('[SS] Signaling:', e); }
     processingSignaling = false;
     processQueue();
 }
 
+// ─── MEDIA ────────────────────────────────────────────────────────────────────
 async function updateMedia() {
     try {
         if (isMicOn || isCamOn) {
@@ -150,61 +155,83 @@ async function updateMedia() {
                 });
                 Object.values(peerConnections).forEach(({ pc }) => {
                     localStream.getTracks().forEach(track => {
-                        const existing = pc.getSenders().find(s => s.track?.kind === track.kind);
-                        if (existing) existing.replaceTrack(track);
-                        else pc.addTrack(track, localStream);
+                        const ex = pc.getSenders().find(s => s.track?.kind === track.kind);
+                        if (ex) ex.replaceTrack(track); else pc.addTrack(track, localStream);
                     });
                 });
             }
             localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
-            localStream.getVideoTracks().forEach(t => t.enabled = isCamOn);
-            if (isCamOn) addVideoTile('local', localStream, 'You');
-            else removeVideoTile('local');
+            localStream.getVideoTracks().forEach(t => t.enabled = isCamOn && !isScreenSharing);
+            if (isCamOn && !isScreenSharing) addVideoTile('local', localStream, 'You');
+            else if (!isScreenSharing) removeVideoTile('local');
         } else {
-            if (localStream) {
+            if (localStream && !isScreenSharing) {
                 localStream.getTracks().forEach(t => t.stop());
                 localStream = null;
                 Object.values(peerConnections).forEach(({ pc }) => {
                     pc.getSenders().forEach(s => { try { pc.removeTrack(s); } catch (_) {} });
                 });
+                removeVideoTile('local');
             }
-            removeVideoTile('local');
         }
-    } catch (e) { console.error('[SyncStream] Media error:', e); isMicOn = false; isCamOn = false; }
+    } catch (e) { console.error('[SS] Media:', e); isMicOn = false; isCamOn = false; }
     updateButtons();
 }
 
-// ─── DRAG HELPER ─────────────────────────────────────────────────────────────
+async function toggleScreenShare() {
+    if (isScreenSharing) {
+        if (screenStream) { screenStream.getTracks().forEach(t => t.stop()); screenStream = null; }
+        isScreenSharing = false;
+        // Restore camera track if cam is on
+        Object.values(peerConnections).forEach(({ pc }) => {
+            const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+            const camTrack = localStream?.getVideoTracks()[0];
+            if (sender && camTrack) sender.replaceTrack(camTrack);
+            else if (sender) pc.removeTrack(sender);
+        });
+        if (isCamOn && localStream) addVideoTile('local', localStream, 'You');
+        else removeVideoTile('local');
+    } else {
+        try {
+            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+            isScreenSharing = true;
+            const screenTrack = screenStream.getVideoTracks()[0];
+
+            Object.values(peerConnections).forEach(({ pc }) => {
+                const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+                if (sender) sender.replaceTrack(screenTrack);
+                else pc.addTrack(screenTrack, screenStream);
+            });
+            addVideoTile('local', screenStream, '🖥 Screen');
+
+            // Auto-stop when browser chrome "Stop sharing" is clicked
+            screenTrack.onended = () => { isScreenSharing = false; toggleScreenShare(); };
+        } catch (e) {
+            console.error('[SS] Screen share:', e);
+            isScreenSharing = false;
+        }
+    }
+    updateButtons();
+}
+
+// ─── DRAG HELPER ──────────────────────────────────────────────────────────────
 function makeDraggable(el, handle) {
     handle = handle || el;
     handle.style.cursor = 'grab';
     let ox, oy, startL, startT;
-
     handle.addEventListener('mousedown', (e) => {
-        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'LABEL') return;
         e.preventDefault();
         const r = el.getBoundingClientRect();
-        // Snap to fixed coords, clear any centering transforms
-        el.style.left      = r.left + 'px';
-        el.style.top       = r.top  + 'px';
-        el.style.bottom    = 'auto';
-        el.style.right     = 'auto';
-        el.style.transform = 'none';
-        ox = e.clientX; oy = e.clientY;
-        startL = r.left; startT = r.top;
+        el.style.left = r.left + 'px'; el.style.top = r.top + 'px';
+        el.style.bottom = 'auto'; el.style.right = 'auto'; el.style.transform = 'none';
+        ox = e.clientX; oy = e.clientY; startL = r.left; startT = r.top;
         handle.style.cursor = 'grabbing';
-
         const onMove = (e) => {
-            const nx = Math.max(0, Math.min(window.innerWidth  - el.offsetWidth,  startL + e.clientX - ox));
-            const ny = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, startT + e.clientY - oy));
-            el.style.left = nx + 'px';
-            el.style.top  = ny + 'px';
+            el.style.left = Math.max(0, Math.min(window.innerWidth  - el.offsetWidth,  startL + e.clientX - ox)) + 'px';
+            el.style.top  = Math.max(0, Math.min(window.innerHeight - el.offsetHeight, startT + e.clientY - oy)) + 'px';
         };
-        const onUp = () => {
-            handle.style.cursor = 'grab';
-            document.removeEventListener('mousemove', onMove);
-            document.removeEventListener('mouseup',   onUp);
-        };
+        const onUp = () => { handle.style.cursor = 'grab'; document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup',   onUp);
     });
@@ -212,99 +239,83 @@ function makeDraggable(el, handle) {
 
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
 function addVideoTile(id, stream, name) {
-    // Tiles are fixed on the page, grid is just a logical anchor
+    const grid = document.getElementById('ss-grid');
+    if (!grid) return;
     let tile = document.getElementById(`ss-vid-${id}`);
     if (!tile) {
-        const grid = document.getElementById('ss-grid');
-        if (!grid) return;
-
+        const count = document.querySelectorAll('[id^="ss-vid-"]').length;
         tile = document.createElement('div');
         tile.id = `ss-vid-${id}`;
+        tile.style.cssText = `position:fixed;top:${20 + count * 150}px;right:20px;width:180px;height:135px;background:#000;border-radius:12px;overflow:visible;border:1px solid rgba(255,255,255,0.12);pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);z-index:2147483640;opacity:0;transition:opacity 0.3s;`;
 
-        // Starting position: stack from top-right
-        const existingTiles = document.querySelectorAll('[id^="ss-vid-"]').length;
-        const startTop  = 20 + existingTiles * 145;
-        const startRight = 20;
-
-        tile.style.cssText = `
-            position:fixed;
-            top:${startTop}px;
-            right:${startRight}px;
-            width:180px;height:135px;
-            background:#000;
-            border-radius:12px;
-            overflow:visible;
-            border:1px solid rgba(255,255,255,0.15);
-            pointer-events:auto;
-            box-shadow:0 8px 24px rgba(0,0,0,0.6);
-            z-index:2147483640;
-            transition:box-shadow 0.2s, opacity 0.3s;
-            opacity:0;
-        `;
-        // Clip the video inside
         const inner = document.createElement('div');
         inner.style.cssText = 'width:100%;height:100%;border-radius:12px;overflow:hidden;position:relative;';
         tile.appendChild(inner);
 
         const v = document.createElement('video');
-        v.id = `ss-v-${id}`;
-        v.autoplay = true; v.playsInline = true;
-        v.muted = (id === 'local');
+        v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
         v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
         inner.appendChild(v);
 
         // Label
         const lbl = document.createElement('div');
         lbl.textContent = name;
-        lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;pointer-events:none;letter-spacing:0.03em;';
+        lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;pointer-events:none;';
         inner.appendChild(lbl);
 
-        // Drag handle (top bar)
+        // Drag handle
         const handle = document.createElement('div');
-        handle.style.cssText = 'position:absolute;top:0;left:0;right:0;height:28px;z-index:2;';
+        handle.style.cssText = 'position:absolute;top:0;left:0;right:0;height:30px;z-index:2;';
         tile.appendChild(handle);
+        makeDraggable(tile, handle);
 
         // Close button
         const closeBtn = document.createElement('button');
         closeBtn.textContent = '✕';
-        closeBtn.style.cssText = 'position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;background:#ef4444;border:none;color:#fff;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:3;box-shadow:0 2px 8px rgba(0,0,0,0.4);transition:transform 0.15s;';
+        closeBtn.style.cssText = 'position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;background:#ef4444;border:none;color:#fff;font-size:11px;cursor:pointer;z-index:3;box-shadow:0 2px 8px rgba(0,0,0,0.5);transition:transform 0.15s;';
         closeBtn.onmouseenter = () => closeBtn.style.transform = 'scale(1.15)';
         closeBtn.onmouseleave = () => closeBtn.style.transform = 'scale(1)';
         closeBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => tile.remove(), 300); };
         tile.appendChild(closeBtn);
 
-        // Mute button (remote tiles only)
+        // Volume slider (remote tiles only) — appears on hover
         if (id !== 'local') {
-            const muteBtn = document.createElement('button');
-            muteBtn.textContent = '🔊';
-            muteBtn.title = 'Mute/unmute this person';
-            muteBtn.style.cssText = 'position:absolute;bottom:-8px;right:-8px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,0.7);border:1px solid rgba(255,255,255,0.2);color:#fff;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:3;transition:transform 0.15s;';
-            muteBtn.onmouseenter = () => muteBtn.style.transform = 'scale(1.15)';
-            muteBtn.onmouseleave = () => muteBtn.style.transform = 'scale(1)';
-            muteBtn.onclick = (e) => {
-                e.stopPropagation();
+            const volWrap = document.createElement('div');
+            volWrap.style.cssText = 'position:absolute;bottom:-28px;left:0;right:0;display:flex;align-items:center;gap:6px;padding:0 6px;opacity:0;transition:opacity 0.2s;pointer-events:auto;';
+            const volIcon = document.createElement('span');
+            volIcon.textContent = '🔊';
+            volIcon.style.cssText = 'font-size:11px;cursor:pointer;flex-shrink:0;';
+            const volSlider = document.createElement('input');
+            volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.05'; volSlider.value = '1';
+            volSlider.style.cssText = 'flex:1;height:3px;cursor:pointer;accent-color:#6366f1;';
+            volSlider.oninput = () => {
+                const vEl = document.getElementById(`ss-v-${id}`);
+                if (vEl) { vEl.volume = parseFloat(volSlider.value); vEl.muted = parseFloat(volSlider.value) === 0; }
+                volIcon.textContent = parseFloat(volSlider.value) === 0 ? '🔇' : '🔊';
+            };
+            volIcon.onclick = () => {
                 const vEl = document.getElementById(`ss-v-${id}`);
                 if (!vEl) return;
                 vEl.muted = !vEl.muted;
-                muteBtn.textContent = vEl.muted ? '🔇' : '🔊';
+                volSlider.value = vEl.muted ? '0' : '1';
+                volIcon.textContent = vEl.muted ? '🔇' : '🔊';
             };
-            tile.appendChild(muteBtn);
+            volWrap.appendChild(volIcon);
+            volWrap.appendChild(volSlider);
+            tile.appendChild(volWrap);
+
+            tile.onmouseenter = () => { volWrap.style.opacity = '1'; };
+            tile.onmouseleave = () => { volWrap.style.opacity = '0'; };
         }
 
-        makeDraggable(tile, handle);
         grid.appendChild(tile);
-
-        // Fade in
         requestAnimationFrame(() => { tile.style.opacity = '1'; });
     }
 
     const vEl = document.getElementById(`ss-v-${id}`);
     if (vEl && vEl.srcObject !== stream) {
         vEl.srcObject = stream;
-        vEl.play().catch(() => {
-            vEl.muted = true;
-            vEl.play().then(() => { if (id !== 'local') vEl.muted = false; }).catch(() => {});
-        });
+        vEl.play().catch(() => { vEl.muted = true; vEl.play().then(() => { if (id !== 'local') vEl.muted = false; }).catch(() => {}); });
     }
 }
 
@@ -318,18 +329,16 @@ function removeVideoTile(id) {
 // ─── NOTIFICATION SOUND ───────────────────────────────────────────────────────
 function playNotifSound() {
     try {
-        const ctx = new AudioContext();
-        const osc = ctx.createOscillator();
+        const ctx  = new AudioContext();
+        const osc  = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
+        osc.connect(gain); gain.connect(ctx.destination);
         osc.type = 'sine';
         osc.frequency.setValueAtTime(880,  ctx.currentTime);
         osc.frequency.setValueAtTime(1100, ctx.currentTime + 0.08);
         gain.gain.setValueAtTime(0.25, ctx.currentTime);
         gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-        osc.start(ctx.currentTime);
-        osc.stop(ctx.currentTime + 0.35);
+        osc.start(); osc.stop(ctx.currentTime + 0.35);
     } catch (_) {}
 }
 
@@ -340,24 +349,16 @@ function handleIncomingChat(user, text, color) {
         unreadCount++;
         updateUnreadBadge();
         playNotifSound();
-        // Flash chat button
         const btn = document.getElementById('ss-b-chat');
-        if (btn) {
-            btn.style.background = '#f59e0b';
-            setTimeout(() => updateButtons(), 800);
-        }
+        if (btn) { btn.style.background = '#f59e0b'; setTimeout(() => updateButtons(), 900); }
     }
 }
 
 function updateUnreadBadge() {
-    const badge = document.getElementById('ss-chat-badge');
-    if (!badge) return;
-    if (unreadCount > 0) {
-        badge.textContent = unreadCount > 9 ? '9+' : unreadCount;
-        badge.style.display = 'flex';
-    } else {
-        badge.style.display = 'none';
-    }
+    const b = document.getElementById('ss-chat-badge');
+    if (!b) return;
+    b.textContent  = unreadCount > 9 ? '9+' : unreadCount;
+    b.style.display = unreadCount > 0 ? 'flex' : 'none';
 }
 
 function addChatMessage(user, text, color) {
@@ -366,25 +367,22 @@ function addChatMessage(user, text, color) {
     const m = document.createElement('div');
     m.style.cssText = 'font-size:12px;word-wrap:break-word;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.2s ease;';
     const b = document.createElement('b');
-    b.style.color = color || '#6366f1';
-    b.textContent = user + ':';
+    b.style.color = color || '#6366f1'; b.textContent = user + ':';
     const s = document.createElement('span');
-    s.style.color = '#ddd';
-    s.textContent = ' ' + text;
-    m.appendChild(b);
-    m.appendChild(s);
+    s.style.color = '#ddd'; s.textContent = ' ' + text;
+    m.appendChild(b); m.appendChild(s);
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
 }
 
-// ─── EMOJI / TOAST ────────────────────────────────────────────────────────────
+// ─── EMOJI & TOAST ────────────────────────────────────────────────────────────
 function animateEmoji(emoji) {
     const e = document.createElement('div');
     e.textContent = emoji;
-    e.style.cssText = `position:fixed;bottom:100px;left:${38 + Math.random() * 24}%;font-size:44px;z-index:999999;pointer-events:none;transition:transform 1.8s cubic-bezier(0.2,0.8,0.4,1),opacity 1.8s ease;opacity:1;`;
+    e.style.cssText = `position:fixed;bottom:100px;left:${38+Math.random()*24}%;font-size:44px;z-index:999999;pointer-events:none;transition:transform 1.8s cubic-bezier(0.2,0.8,0.4,1),opacity 1.8s ease;opacity:1;`;
     document.body.appendChild(e);
     requestAnimationFrame(() => requestAnimationFrame(() => {
-        e.style.transform = `translateY(-380px) rotate(${(Math.random()-0.5)*30}deg) scale(1.4)`;
+        e.style.transform = `translateY(-380px) rotate(${(Math.random()-.5)*30}deg) scale(1.4)`;
         e.style.opacity   = '0';
     }));
     setTimeout(() => e.remove(), 2000);
@@ -393,22 +391,21 @@ function animateEmoji(emoji) {
 function showToast(text, color) {
     const t = document.createElement('div');
     t.textContent = text;
-    t.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-8px);background:rgba(15,15,25,0.95);color:${color||'#fff'};padding:8px 18px;border-radius:20px;z-index:999999;font-size:12px;font-weight:600;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.1);box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none;transition:transform 0.3s ease,opacity 0.3s ease;opacity:0;`;
+    t.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-10px);background:rgba(10,10,20,0.95);color:${color||'#fff'};padding:8px 18px;border-radius:20px;z-index:999999;font-size:12px;font-weight:600;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.1);box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none;transition:transform 0.3s ease,opacity 0.3s ease;opacity:0;`;
     document.body.appendChild(t);
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-        t.style.transform = 'translateX(-50%) translateY(0)';
-        t.style.opacity   = '1';
-    }));
-    setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(-50%) translateY(-8px)'; }, 2700);
+    requestAnimationFrame(() => requestAnimationFrame(() => { t.style.transform = 'translateX(-50%) translateY(0)'; t.style.opacity = '1'; }));
+    setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(-50%) translateY(-10px)'; }, 2700);
     setTimeout(() => t.remove(), 3100);
 }
 
 // ─── BUTTONS ─────────────────────────────────────────────────────────────────
 function updateButtons() {
-    const set = (id, c) => { const el = document.getElementById(id); if (el) el.style.background = c ? '#6366f1' : 'rgba(255,255,255,0.1)'; };
-    set('ss-b-chat', isChatOpen);
-    set('ss-b-mic',  isMicOn);
-    set('ss-b-cam',  isCamOn);
+    const active = '#6366f1', idle = 'rgba(255,255,255,0.08)';
+    const set = (id, on) => { const el = document.getElementById(id); if (el) el.style.background = on ? active : idle; };
+    set('ss-b-chat',   isChatOpen);
+    set('ss-b-mic',    isMicOn);
+    set('ss-b-cam',    isCamOn);
+    set('ss-b-screen', isScreenSharing);
 }
 
 function updateParticipantPanel() {
@@ -416,23 +413,45 @@ function updateParticipantPanel() {
     if (!p || !roomState?.users) return;
     p.innerHTML = '';
     const title = document.createElement('div');
-    title.style.cssText = 'font-size:11px;font-weight:700;color:#6366f1;margin-bottom:8px;letter-spacing:0.05em;';
+    title.style.cssText = 'font-size:11px;font-weight:700;color:#6366f1;margin-bottom:10px;letter-spacing:0.05em;';
     title.textContent = `ONLINE (${roomState.users.length})`;
     p.appendChild(title);
     roomState.users.forEach(u => {
         const row = document.createElement('div');
-        row.style.cssText = 'font-size:12px;margin-bottom:6px;display:flex;align-items:center;gap:8px;';
+        row.style.cssText = 'font-size:12px;margin-bottom:7px;display:flex;align-items:center;gap:8px;';
         const av = document.createElement('div');
-        av.style.cssText = `width:24px;height:24px;border-radius:50%;background:${u.color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#111;flex-shrink:0;`;
+        av.style.cssText = `width:26px;height:26px;border-radius:50%;background:${u.color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#111;flex-shrink:0;`;
         av.textContent = u.username.charAt(0).toUpperCase();
         const name = document.createElement('span');
         name.style.cssText = 'color:#ddd;flex:1;';
         name.textContent = u.username + (u.isHost ? ' 👑' : '') + (u.isInCall ? ' 🎤' : '');
-        row.appendChild(av);
-        row.appendChild(name);
+        row.appendChild(av); row.appendChild(name);
         p.appendChild(row);
     });
 }
+
+// ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+    if (!e.altKey) return;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+    const actions = {
+        'm': () => { isMicOn = !isMicOn; updateMedia(); showToast(isMicOn ? '🎤 Mic ON' : '🎤 Mic OFF'); },
+        'c': () => { isCamOn = !isCamOn; updateMedia(); showToast(isCamOn ? '📷 Camera ON' : '📷 Camera OFF'); },
+        's': () => { toggleScreenShare(); showToast(isScreenSharing ? '🖥 Screen Share ON' : '🖥 Screen Share OFF'); },
+        't': () => {
+            isChatOpen = !isChatOpen;
+            const chat = document.getElementById('ss-chat');
+            if (chat) { chat.style.display = isChatOpen ? 'flex' : 'none'; if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); } }
+            updateButtons();
+        },
+        'p': () => { const p = document.getElementById('ss-participants'); if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none'; }
+    };
+
+    const handler = actions[e.key.toLowerCase()];
+    if (handler) { e.preventDefault(); handler(); }
+}, true);
 
 // ─── UI INJECTION ─────────────────────────────────────────────────────────────
 function injectUI() {
@@ -443,119 +462,127 @@ function injectUI() {
     root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif;';
     document.body.appendChild(root);
 
-    // Global styles
     const style = document.createElement('style');
     style.textContent = `
-        @keyframes ss-fadein { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+        @keyframes ss-fadein { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:none; } }
         #ss-dock { transition: opacity 0.35s ease, transform 0.35s ease; }
-        #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(-50%) translateY(12px) !important; pointer-events:none !important; }
-        #ss-msgs::-webkit-scrollbar { width:4px; }
-        #ss-msgs::-webkit-scrollbar-track { background:transparent; }
-        #ss-msgs::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.15); border-radius:4px; }
+        #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(-50%) translateY(14px) !important; pointer-events:none !important; }
+        #ss-msgs::-webkit-scrollbar { width:3px; }
+        #ss-msgs::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:4px; }
     `;
     document.head.appendChild(style);
 
-    // ── DOCK ──────────────────────────────────────────────────────────────────
+    // ── DOCK ─────────────────────────────────────────────────────────────────
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(8,8,16,0.92);backdrop-filter:blur(24px);border-radius:32px;display:flex;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.6);';
+    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);';
 
-    const mkBtn = (emoji, id, h, tip) => {
+    const mkBtn = (emoji, id, handler, tip) => {
         const b = document.createElement('button');
         b.id = id; b.innerHTML = emoji; b.title = tip || '';
         b.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:17px;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.15s;position:relative;flex-shrink:0;';
-        b.onmouseenter = () => { b.style.transform = 'scale(1.12)'; b.style.background = 'rgba(255,255,255,0.18)'; };
-        b.onmouseleave = () => { b.style.transform = 'scale(1)'; updateButtons(); };
-        b.onclick = (e) => { e.stopPropagation(); h(); };
+        b.onmouseenter = () => { b.style.transform='scale(1.12)'; b.style.background='rgba(255,255,255,0.18)'; };
+        b.onmouseleave = () => { b.style.transform='scale(1)'; updateButtons(); };
+        b.onclick = (e) => { e.stopPropagation(); handler(); };
         return b;
     };
 
-    // Chat button with unread badge
+    // Chat btn + badge
     const chatBtn = mkBtn('💬', 'ss-b-chat', () => {
         isChatOpen = !isChatOpen;
         chatPanel.style.display = isChatOpen ? 'flex' : 'none';
-        if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); }
+        if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); const i = document.getElementById('ss-chat-in'); if (i) i.focus(); }
         updateButtons();
-    }, 'Chat');
+    }, 'Chat (Alt+T)');
     const badge = document.createElement('div');
     badge.id = 'ss-chat-badge';
     badge.style.cssText = 'position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;font-size:9px;font-weight:700;width:16px;height:16px;border-radius:50%;display:none;align-items:center;justify-content:center;pointer-events:none;';
     chatBtn.appendChild(badge);
     dock.appendChild(chatBtn);
 
-    dock.appendChild(mkBtn('🎤', 'ss-b-mic',  () => { isMicOn = !isMicOn; updateMedia(); }, 'Mic'));
-    dock.appendChild(mkBtn('📷', 'ss-b-cam',  () => { isCamOn = !isCamOn; updateMedia(); }, 'Camera'));
-    dock.appendChild(mkBtn('👥', 'ss-b-people', () => {
-        const p = document.getElementById('ss-participants');
-        if (p) { p.style.display = p.style.display === 'none' ? 'block' : 'none'; }
-    }, 'Participants'));
+    dock.appendChild(mkBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },          'Mic (Alt+M)'));
+    dock.appendChild(mkBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },          'Camera (Alt+C)'));
+    dock.appendChild(mkBtn('🖥',  'ss-b-screen', () => toggleScreenShare(),                             'Screen Share (Alt+S)'));
+    dock.appendChild(mkBtn('👥', 'ss-b-people', () => { const p = document.getElementById('ss-participants'); if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none'; }, 'Participants (Alt+P)'));
 
-    // Separator
     const sep = document.createElement('div');
-    sep.style.cssText = 'width:1px;height:22px;background:rgba(255,255,255,0.1);margin:0 2px;';
+    sep.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0;';
     dock.appendChild(sep);
 
-    ['❤️', '😂', '🔥', '😮', '👏'].forEach(em => {
+    ['❤️','😂','🔥','😮','👏'].forEach(em => {
         dock.appendChild(mkBtn(em, '', () => chrome.runtime.sendMessage({ type: 'REACTION', emoji: em })));
     });
+
+    // Now Playing label inside dock
+    const npLabel = document.createElement('div');
+    npLabel.style.cssText = 'margin-left:6px;padding-left:10px;border-left:1px solid rgba(255,255,255,0.1);max-width:160px;flex-shrink:1;overflow:hidden;';
+    npLabel.innerHTML = '<div style="font-size:9px;color:#555;letter-spacing:0.06em;text-transform:uppercase;">Now Playing</div>';
+    const npTitle = document.createElement('div');
+    npTitle.id = 'ss-np-title';
+    npTitle.style.cssText = 'font-size:11px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    npTitle.textContent = '—';
+    npLabel.appendChild(npTitle);
+    dock.appendChild(npLabel);
 
     root.appendChild(dock);
     makeDraggable(dock);
 
-    // ── AUTO-HIDE DOCK ────────────────────────────────────────────────────────
-    let hideTimer = null;
+    // ── AUTO-HIDE ─────────────────────────────────────────────────────────────
+    let hideTimer;
     const showDock = () => {
         dock.classList.remove('ss-hidden');
         clearTimeout(hideTimer);
-        hideTimer = setTimeout(() => {
-            // Don't hide if mouse is over the dock
-            if (!dock.matches(':hover')) dock.classList.add('ss-hidden');
-        }, 3000);
+        hideTimer = setTimeout(() => { if (!dock.matches(':hover')) dock.classList.add('ss-hidden'); }, 3000);
     };
     document.addEventListener('mousemove', showDock, { passive: true });
     dock.addEventListener('mouseenter', () => clearTimeout(hideTimer));
-    dock.addEventListener('mouseleave', () => {
-        hideTimer = setTimeout(() => dock.classList.add('ss-hidden'), 3000);
-    });
-    // Start visible
+    dock.addEventListener('mouseleave', () => { hideTimer = setTimeout(() => dock.classList.add('ss-hidden'), 3000); });
     showDock();
+
+    // ── SYNC INDICATOR ────────────────────────────────────────────────────────
+    const syncInd = document.createElement('div');
+    syncInd.id = 'ss-sync-ind';
+    syncInd.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.92);color:#fff;padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;z-index:999999;pointer-events:none;opacity:0;transition:opacity 0.4s ease;letter-spacing:0.04em;';
+    root.appendChild(syncInd);
 
     // ── CHAT PANEL ────────────────────────────────────────────────────────────
     const chatPanel = document.createElement('div');
     chatPanel.id = 'ss-chat';
-    chatPanel.style.cssText = 'position:fixed;bottom:90px;right:24px;width:290px;height:360px;background:rgba(8,8,16,0.96);border:1px solid rgba(255,255,255,0.1);border-radius:16px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 12px 40px rgba(0,0,0,0.6);overflow:hidden;';
+    chatPanel.style.cssText = 'position:fixed;bottom:90px;right:24px;width:290px;height:360px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 12px 40px rgba(0,0,0,0.65);overflow:hidden;';
     root.appendChild(chatPanel);
     makeDraggable(chatPanel);
 
     const chatHeader = document.createElement('div');
-    chatHeader.style.cssText = 'padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.07);color:#fff;font-size:12px;font-weight:700;letter-spacing:0.06em;display:flex;justify-content:space-between;align-items:center;cursor:grab;';
+    chatHeader.style.cssText = 'padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.07);color:#fff;font-size:12px;font-weight:700;letter-spacing:0.06em;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;';
     chatHeader.textContent = 'CHAT';
     const closeChat = document.createElement('button');
     closeChat.textContent = '✕';
-    closeChat.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;font-size:13px;padding:0;';
+    closeChat.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;font-size:13px;padding:0;transition:color 0.2s;';
+    closeChat.onmouseenter = () => closeChat.style.color = '#fff';
+    closeChat.onmouseleave = () => closeChat.style.color = '#555';
     closeChat.onclick = () => { isChatOpen = false; chatPanel.style.display = 'none'; updateButtons(); };
     chatHeader.appendChild(closeChat);
     chatPanel.appendChild(chatHeader);
 
     const msgs = document.createElement('div');
     msgs.id = 'ss-msgs';
-    msgs.style.cssText = 'flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px;';
+    msgs.style.cssText = 'flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:2px;';
     chatPanel.appendChild(msgs);
 
     const chatFooter = document.createElement('div');
     chatFooter.style.cssText = 'padding:10px 12px;display:flex;gap:8px;border-top:1px solid rgba(255,255,255,0.06);';
     const chatInput = document.createElement('input');
     chatInput.id = 'ss-chat-in';
-    chatInput.placeholder = 'Message...';
-    chatInput.autocomplete = 'off';
-    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;';
+    chatInput.placeholder = 'Message...'; chatInput.autocomplete = 'off';
+    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;';
+    chatInput.onfocus = () => chatInput.style.borderColor = '#6366f1';
+    chatInput.onblur  = () => chatInput.style.borderColor = 'rgba(255,255,255,0.08)';
     const sendBtn = document.createElement('button');
     sendBtn.textContent = '↑';
     sendBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.2s,transform 0.15s;';
-    sendBtn.onmouseenter = () => { sendBtn.style.background = '#4f46e5'; sendBtn.style.transform = 'scale(1.08)'; };
-    sendBtn.onmouseleave = () => { sendBtn.style.background = '#6366f1'; sendBtn.style.transform = 'scale(1)'; };
-    chatFooter.appendChild(chatInput);
-    chatFooter.appendChild(sendBtn);
+    sendBtn.onmouseenter = () => { sendBtn.style.background='#4f46e5'; sendBtn.style.transform='scale(1.08)'; };
+    sendBtn.onmouseleave = () => { sendBtn.style.background='#6366f1'; sendBtn.style.transform='scale(1)'; };
+    chatFooter.appendChild(chatInput); chatFooter.appendChild(sendBtn);
     chatPanel.appendChild(chatFooter);
 
     const sendMessage = () => {
@@ -569,26 +596,55 @@ function injectUI() {
     // ── PARTICIPANTS PANEL ────────────────────────────────────────────────────
     const pP = document.createElement('div');
     pP.id = 'ss-participants';
-    pP.style.cssText = 'position:fixed;bottom:90px;left:24px;width:210px;background:rgba(8,8,16,0.96);border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:14px;display:none;color:#fff;pointer-events:auto;box-shadow:0 8px 30px rgba(0,0,0,0.5);';
+    pP.style.cssText = 'position:fixed;bottom:90px;left:24px;width:210px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;padding:14px;display:none;color:#fff;pointer-events:auto;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
     root.appendChild(pP);
     makeDraggable(pP);
 
-    // ── VIDEO GRID (logical container for draggable tiles) ────────────────────
+    // ── VIDEO GRID ────────────────────────────────────────────────────────────
     const grid = document.createElement('div');
     grid.id = 'ss-grid';
     grid.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;';
     root.appendChild(grid);
+
+    // ── KEYBOARD SHORTCUT TOOLTIP ─────────────────────────────────────────────
+    const kbHint = document.createElement('div');
+    kbHint.style.cssText = 'position:fixed;bottom:8px;left:50%;transform:translateX(-50%);font-size:10px;color:rgba(255,255,255,0.2);pointer-events:none;white-space:nowrap;';
+    kbHint.textContent = 'Alt+M mic · Alt+C cam · Alt+S screen · Alt+T chat · Alt+P people';
+    root.appendChild(kbHint);
 }
 
 // ─── MAIN LOOP ─────────────────────────────────────────────────────────────────
-setInterval(() => {
+// Runs at 500ms until video is found, then slows to 2000ms to save CPU
+let loopInterval = null;
+
+function mainLoop() {
     if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
+
     const v = findMainVideo();
     if (v && v !== videoElement) {
         videoElement = v;
+        videoFound   = true;
         v.onplay       = () => broadcastState('play');
         v.onpause      = () => broadcastState('pause');
         v.onseeked     = () => broadcastState('seek');
         v.onratechange = () => broadcastState('rate');
+        // Slow down now that we have the video
+        clearInterval(loopInterval);
+        loopInterval = setInterval(mainLoop, 2000);
     }
-}, 500);
+
+    // Now Playing — detect title change and report
+    if (IS_TOP_FRAME && roomState) {
+        let title = document.title;
+        const h1 = document.querySelector('h1.ytd-video-primary-info-renderer, h1[class*="title"], .video-title');
+        if (h1?.innerText) title = h1.innerText.trim();
+        if (title && title !== lastTitle && title !== document.location.hostname) {
+            lastTitle = title;
+            chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title }).catch(() => {});
+            const npEl = document.getElementById('ss-np-title');
+            if (npEl) npEl.textContent = title;
+        }
+    }
+}
+
+loopInterval = setInterval(mainLoop, 500);
