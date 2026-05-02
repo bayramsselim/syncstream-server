@@ -99,6 +99,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
     else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
     else if (msg.type === 'HOST_NAVIGATE') showNavigateToast(msg.url, msg.title, msg.username);
+    else if (msg.type === 'JOIN_ERROR')    showToast(`❌ ${msg.message || 'Odaya katılınamadı'}`, '#ef4444');
 });
 
 // ─── VIDEO SYNC ───────────────────────────────────────────────────────────────

@@ -68,7 +68,17 @@ function connectWebSocket() {
                 if (currentRoom) { currentRoom.nowPlaying = data.title; currentRoom.nowPlayingUrl = data.url || ''; broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom }); }
                 broadcastToTabs(data);
             }
-            else if (data.type === 'ERROR') { broadcastToPopup({ type: 'JOIN_ERROR', message: data.message }); }
+            else if (data.type === 'ERROR') {
+                broadcastToPopup({ type: 'JOIN_ERROR', message: data.message });
+                broadcastToTabs({ type: 'JOIN_ERROR', message: data.message });
+                // If this was a stale room reconnect, clear the stored data
+                chrome.storage.local.get(['roomData'], (res) => {
+                    if (res.roomData) {
+                        chrome.storage.local.remove('roomData');
+                        currentRoom = null;
+                    }
+                });
+            }
             else { broadcastToTabs(data); }
         } catch (e) { console.error('[SyncStream] Message error:', e); }
     };
