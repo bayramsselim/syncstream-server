@@ -375,8 +375,8 @@ function createTileShell(id, name, color) {
     // Video element — hidden until stream arrives
     const v = document.createElement('video');
     v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
-    v.disableRemotePlayback = true; // reduces buffering overhead on remote streams
-    v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:none;';
+    v.disableRemotePlayback = true;
+    v.style.cssText = `width:100%;height:100%;object-fit:cover;display:none;${id === 'local' ? 'transform:scaleX(-1);' : ''}`;
     tile.appendChild(v);
 
     // Avatar overlay (remote only) — shown until video stream arrives
