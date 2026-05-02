@@ -2,7 +2,7 @@ let socket = null;
 let currentRoom = null;
 let reconnectTimer = null;
 
-const SERVER_URL = 'wss://sync-watch-pro.onrender.com';
+const SERVER_URL = 'wss://syncstream-server.onrender.com';
 
 // Restore room on service worker restart
 chrome.storage.local.get(['roomData'], (result) => {
@@ -119,5 +119,5 @@ connectWebSocket();
 
 // Keep Render free tier awake
 setInterval(() => {
-    fetch('https://sync-watch-pro.onrender.com/health').catch(() => {});
+    fetch('https://syncstream-server.onrender.com/health').catch(() => {});
 }, 5 * 60 * 1000);
