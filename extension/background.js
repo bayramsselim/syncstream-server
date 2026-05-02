@@ -37,6 +37,7 @@ function connectWebSocket() {
         isConnecting = false;
         console.log('[SyncStream] Connected');
         broadcastToPopup({ type: 'CONNECTION_STATUS', connected: true, connecting: false });
+        broadcastToTabs({ type: 'CONNECTION_STATUS', connected: true, connecting: false });
         if (currentRoom?.roomId) {
             socket.send(JSON.stringify({ type: 'JOIN_ROOM', roomId: currentRoom.roomId, username: currentRoom.myUsername }));
         }
@@ -75,6 +76,7 @@ function connectWebSocket() {
         isConnecting = false;
         console.log('[SyncStream] Disconnected');
         broadcastToPopup({ type: 'CONNECTION_STATUS', connected: false, connecting: false });
+        if (currentRoom?.roomId) broadcastToTabs({ type: 'RECONNECTING', seconds: 4 });
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectWebSocket, 4000);
     };

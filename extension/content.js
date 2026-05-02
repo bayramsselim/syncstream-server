@@ -42,12 +42,14 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'SYNC_STATE') { applyRemoteSync(msg); return; }
     if (!IS_TOP_FRAME) return;
 
-    if      (msg.type === 'ROOM_STATE')    { roomState = msg.data; if (roomState.myId) initPeers(); updateParticipantPanel(); }
+    if      (msg.type === 'ROOM_STATE')    { roomState = msg.data; if (roomState.myId) initPeers(); updateParticipantPanel(); syncAvatarTiles(roomState.users || []); const _rt = document.getElementById('ss-reconnect-toast'); if (_rt) _rt.remove(); }
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
     else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
     else if (msg.type === 'TOAST')         showToast(msg.message, msg.color);
     else if (msg.type === 'NOW_PLAYING')   { const el = document.getElementById('ss-np-title'); if (el) el.textContent = msg.title; }
+    else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
+    else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
 });
 
 // ─── VIDEO SYNC ───────────────────────────────────────────────────────────────
@@ -72,7 +74,7 @@ function applyRemoteSync(msg) {
     isSyncing = true;
 
     // Show sync indicator with who triggered it
-    showSyncIndicator(msg.byUsername);
+    showSyncIndicator(msg.byUsername, msg.event);
 
     const diff = Math.abs(videoElement.currentTime - msg.time);
     if (msg.event === 'seek' || diff > 1.2) videoElement.currentTime = msg.time;
@@ -82,13 +84,16 @@ function applyRemoteSync(msg) {
     setTimeout(() => { isSyncing = false; }, 500);
 }
 
-function showSyncIndicator(byUser) {
+function showSyncIndicator(byUser, event) {
     const ind = document.getElementById('ss-sync-ind');
     if (!ind) return;
-    ind.textContent = byUser ? `⟳ synced by ${byUser}` : '⟳ syncing...';
+    const icons = { play: '▶', pause: '⏸', seek: '⏩', rate: '⚡', sync: '⟳' };
+    const icon  = icons[event] || '⟳';
+    ind.textContent = byUser ? `${icon}  ${byUser}` : `${icon}  syncing...`;
     ind.style.opacity = '1';
+    ind.style.transform = 'translateX(-50%) scale(1.06)';
     clearTimeout(ind._t);
-    ind._t = setTimeout(() => { ind.style.opacity = '0'; }, 2000);
+    ind._t = setTimeout(() => { ind.style.opacity = '0'; ind.style.transform = 'translateX(-50%) scale(1)'; }, 2200);
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
@@ -118,6 +123,7 @@ async function createPeer(tid, name) {
     };
     pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+    startStatsMonitor(tid, pc);
     return pObj;
 }
 
@@ -297,88 +303,218 @@ function updateGalleryLayout() {
 }
 
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
+function createTileShell(id, name, color) {
+    const inner = document.getElementById('ss-grid-inner');
+    if (!inner) return null;
+
+    const tile = document.createElement('div');
+    tile.id = `ss-vid-${id}`;
+    tile.style.cssText = 'background:#111;border-radius:10px;overflow:hidden;position:relative;flex-shrink:0;transition:width 0.3s,height 0.3s,opacity 0.25s;opacity:0;';
+
+    // Video element — hidden until stream arrives
+    const v = document.createElement('video');
+    v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
+    v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:none;';
+    tile.appendChild(v);
+
+    // Avatar overlay (remote only) — shown until video stream arrives
+    if (id !== 'local') {
+        const av = document.createElement('div');
+        av.id = `ss-av-${id}`;
+        av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#111;z-index:1;';
+        const avCircle = document.createElement('div');
+        avCircle.style.cssText = `width:54px;height:54px;border-radius:50%;background:${color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#111;`;
+        avCircle.textContent = (name||'?').charAt(0).toUpperCase();
+        av.appendChild(avCircle);
+        tile.appendChild(av);
+
+        // Signal quality dot
+        const sig = document.createElement('div');
+        sig.className = 'ss-signal';
+        sig.title = 'Bağlantı bekleniyor';
+        sig.style.cssText = 'position:absolute;top:6px;left:6px;width:7px;height:7px;border-radius:50%;background:#555;z-index:3;transition:background 0.5s,box-shadow 0.5s;';
+        tile.appendChild(sig);
+    }
+
+    // Name label
+    const lbl = document.createElement('div');
+    lbl.textContent = name;
+    lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 7px;border-radius:4px;pointer-events:none;letter-spacing:0.02em;z-index:3;';
+    tile.appendChild(lbl);
+
+    // Hide button
+    const hideBtn = document.createElement('button');
+    hideBtn.textContent = '✕'; hideBtn.title = 'Gizle';
+    hideBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.55);border:none;color:#fff;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;transition:background 0.15s;z-index:3;';
+    hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.style.display = 'none'; updateGalleryLayout(); }, 280); };
+    tile.appendChild(hideBtn);
+
+    // Volume bar (remote only)
+    if (id !== 'local') {
+        const savedVol = parseFloat(localStorage.getItem(`ss-vol-${id}`) || '1');
+        const volBar = document.createElement('div');
+        volBar.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:6px 8px;display:flex;align-items:center;gap:6px;background:linear-gradient(transparent,rgba(0,0,0,0.7));opacity:0;transition:opacity 0.2s;pointer-events:auto;z-index:3;';
+        const volIcon = document.createElement('span');
+        volIcon.textContent = savedVol === 0 ? '🔇' : '🔊';
+        volIcon.style.cssText = 'font-size:11px;cursor:pointer;flex-shrink:0;color:#fff;';
+        const volSlider = document.createElement('input');
+        volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.05';
+        volSlider.value = String(savedVol);
+        volSlider.style.cssText = 'flex:1;height:3px;cursor:pointer;accent-color:#6366f1;';
+        volSlider.oninput = () => {
+            const vEl = document.getElementById(`ss-v-${id}`);
+            const vol = parseFloat(volSlider.value);
+            if (vEl) { vEl.volume = vol; vEl.muted = vol === 0; }
+            volIcon.textContent = vol === 0 ? '🔇' : '🔊';
+            localStorage.setItem(`ss-vol-${id}`, String(vol));
+        };
+        volIcon.onclick = () => {
+            const vEl = document.getElementById(`ss-v-${id}`);
+            if (!vEl) return;
+            vEl.muted = !vEl.muted;
+            volSlider.value = vEl.muted ? '0' : '1';
+            volIcon.textContent = vEl.muted ? '🔇' : '🔊';
+            localStorage.setItem(`ss-vol-${id}`, volSlider.value);
+        };
+        volBar.appendChild(volIcon); volBar.appendChild(volSlider);
+        tile.appendChild(volBar);
+
+        tile.onmouseenter = () => { volBar.style.opacity = '1'; hideBtn.style.display = 'flex'; };
+        tile.onmouseleave = () => { volBar.style.opacity = '0'; hideBtn.style.display = 'none'; };
+    } else {
+        tile.onmouseenter = () => { hideBtn.style.display = 'flex'; };
+        tile.onmouseleave = () => { hideBtn.style.display = 'none'; };
+    }
+
+    inner.appendChild(tile);
+    requestAnimationFrame(() => { tile.style.opacity = '1'; });
+    return tile;
+}
+
 function addVideoTile(id, stream, name) {
     const inner = document.getElementById('ss-grid-inner');
     if (!inner) return;
 
     let tile = document.getElementById(`ss-vid-${id}`);
-    // If tile was manually hidden, restore it
     if (tile && tile.style.display === 'none') {
         tile.style.display = '';
         requestAnimationFrame(() => { tile.style.opacity = '1'; });
         updateGalleryLayout();
     }
     if (!tile) {
-        tile = document.createElement('div');
-        tile.id = `ss-vid-${id}`;
-        tile.style.cssText = 'background:#000;border-radius:10px;overflow:hidden;position:relative;flex-shrink:0;transition:width 0.3s,height 0.3s,opacity 0.25s;opacity:0;';
-
-        const v = document.createElement('video');
-        v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
-        v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
-        tile.appendChild(v);
-
-        // Name label
-        const lbl = document.createElement('div');
-        lbl.textContent = name;
-        lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 7px;border-radius:4px;pointer-events:none;letter-spacing:0.02em;';
-        tile.appendChild(lbl);
-
-        // Hide button (top-right)
-        const hideBtn = document.createElement('button');
-        hideBtn.textContent = '✕';
-        hideBtn.title = 'Hide';
-        hideBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.55);border:none;color:#fff;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;transition:background 0.15s;z-index:2;';
-        hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.style.display = 'none'; updateGalleryLayout(); }, 280); };
-        tile.appendChild(hideBtn);
-
-        // Volume overlay (bottom, remote only) — appears on hover
-        if (id !== 'local') {
-            const volBar = document.createElement('div');
-            volBar.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:6px 8px;display:flex;align-items:center;gap:6px;background:linear-gradient(transparent,rgba(0,0,0,0.7));opacity:0;transition:opacity 0.2s;pointer-events:auto;';
-            const volIcon = document.createElement('span');
-            volIcon.textContent = '🔊'; volIcon.style.cssText = 'font-size:11px;cursor:pointer;flex-shrink:0;color:#fff;';
-            const volSlider = document.createElement('input');
-            volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.05'; volSlider.value = '1';
-            volSlider.style.cssText = 'flex:1;height:3px;cursor:pointer;accent-color:#6366f1;';
-            volSlider.oninput = () => {
-                const vEl = document.getElementById(`ss-v-${id}`);
-                if (vEl) { vEl.volume = parseFloat(volSlider.value); vEl.muted = vEl.volume === 0; }
-                volIcon.textContent = parseFloat(volSlider.value) === 0 ? '🔇' : '🔊';
-            };
-            volIcon.onclick = () => {
-                const vEl = document.getElementById(`ss-v-${id}`);
-                if (!vEl) return;
-                vEl.muted = !vEl.muted;
-                volSlider.value = vEl.muted ? '0' : '1';
-                volIcon.textContent = vEl.muted ? '🔇' : '🔊';
-            };
-            volBar.appendChild(volIcon); volBar.appendChild(volSlider);
-            tile.appendChild(volBar);
-
-            tile.onmouseenter = () => { volBar.style.opacity = '1'; hideBtn.style.display = 'flex'; };
-            tile.onmouseleave = () => { volBar.style.opacity = '0'; hideBtn.style.display = 'none'; };
-        } else {
-            tile.onmouseenter = () => { hideBtn.style.display = 'flex'; };
-            tile.onmouseleave = () => { hideBtn.style.display = 'none'; };
-        }
-
-        inner.appendChild(tile);
+        const userColor = roomState?.users?.find(u => u.id === id)?.color;
+        tile = createTileShell(id, name, userColor);
+        if (!tile) return;
         updateGalleryLayout();
     }
 
+    // Hide avatar overlay, show video
+    const av = document.getElementById(`ss-av-${id}`);
+    if (av) av.style.display = 'none';
+
     const vEl = document.getElementById(`ss-v-${id}`);
-    if (vEl && vEl.srcObject !== stream) {
+    if (!vEl) return;
+    vEl.style.display = 'block';
+
+    // Apply saved volume
+    if (id !== 'local') {
+        const vol = parseFloat(localStorage.getItem(`ss-vol-${id}`) || '1');
+        vEl.volume = vol; vEl.muted = vol === 0;
+    }
+
+    if (vEl.srcObject !== stream) {
         vEl.srcObject = stream;
         vEl.play().catch(() => { vEl.muted = true; vEl.play().then(() => { if (id !== 'local') vEl.muted = false; }).catch(() => {}); });
     }
 }
 
+function syncAvatarTiles(users) {
+    const inner = document.getElementById('ss-grid-inner');
+    if (!inner || !roomState?.myId) return;
+
+    const activeIds = new Set();
+    users.forEach(u => {
+        if (u.id === roomState.myId) return;
+        activeIds.add(u.id);
+        if (!document.getElementById(`ss-vid-${u.id}`)) {
+            createTileShell(u.id, u.username, u.color);
+            updateGalleryLayout();
+        }
+    });
+
+    // Remove tiles for users who left
+    inner.querySelectorAll('[id^="ss-vid-"]').forEach(tile => {
+        const id = tile.id.replace('ss-vid-', '');
+        if (id !== 'local' && !activeIds.has(id)) {
+            tile.style.opacity = '0';
+            setTimeout(() => { tile.remove(); updateGalleryLayout(); }, 280);
+        }
+    });
+}
+
 function removeVideoTile(id) {
-    const el = document.getElementById(`ss-vid-${id}`);
-    if (!el) return;
-    el.style.opacity = '0';
-    setTimeout(() => { el.remove(); updateGalleryLayout(); }, 280);
+    if (id === 'local') {
+        const el = document.getElementById('ss-vid-local');
+        if (!el) return;
+        el.style.opacity = '0';
+        setTimeout(() => { el.remove(); updateGalleryLayout(); }, 280);
+        return;
+    }
+    // Remote: revert to avatar instead of full removal
+    const vEl = document.getElementById(`ss-v-${id}`);
+    const av  = document.getElementById(`ss-av-${id}`);
+    if (vEl) { vEl.srcObject = null; vEl.style.display = 'none'; }
+    if (av)  av.style.display = 'flex';
+    const tile = document.getElementById(`ss-vid-${id}`);
+    if (tile) {
+        const sig = tile.querySelector('.ss-signal');
+        if (sig) { sig.style.background = '#555'; sig.style.boxShadow = 'none'; sig.title = 'Bağlantı bekleniyor'; }
+    }
+}
+
+// ─── STATS MONITOR ────────────────────────────────────────────────────────────
+function startStatsMonitor(tid, pc) {
+    const timer = setInterval(async () => {
+        const tile = document.getElementById(`ss-vid-${tid}`);
+        if (!tile || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
+            clearInterval(timer); return;
+        }
+        const sig = tile.querySelector('.ss-signal');
+        if (!sig) return;
+        try {
+            const stats = await pc.getStats();
+            let quality = 'good';
+            stats.forEach(r => {
+                if (r.type === 'inbound-rtp' && r.kind === 'video') {
+                    const fps  = r.framesPerSecond || 0;
+                    const loss = (r.packetsLost || 0) / Math.max(1, (r.packetsLost || 0) + (r.packetsReceived || 1));
+                    if (fps < 5  || loss > 0.15) quality = 'poor';
+                    else if (fps < 15 || loss > 0.05) quality = 'medium';
+                }
+            });
+            const clr  = { good: '#10b981', medium: '#f59e0b', poor: '#ef4444' }[quality];
+            const tips = { good: 'Bağlantı iyi', medium: 'Bağlantı kararsız', poor: 'Bağlantı zayıf' }[quality];
+            sig.style.background = clr;
+            sig.style.boxShadow  = `0 0 5px ${clr}`;
+            sig.title = tips;
+        } catch (_) {}
+    }, 3000);
+}
+
+// ─── RECONNECT TOAST ──────────────────────────────────────────────────────────
+function showReconnectToast(sec) {
+    let t = document.getElementById('ss-reconnect-toast');
+    if (!t) {
+        t = document.createElement('div');
+        t.id = 'ss-reconnect-toast';
+        t.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(239,68,68,0.95);color:#fff;padding:10px 22px;border-radius:20px;font-size:12px;font-weight:600;z-index:2147483646;pointer-events:none;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.15);box-shadow:0 4px 24px rgba(0,0,0,0.5);white-space:nowrap;';
+        document.body.appendChild(t);
+    }
+    let s = sec;
+    clearInterval(t._timer);
+    const update = () => { t.textContent = `⚡ Bağlantı kesildi — ${s}s sonra yeniden bağlanıyor...`; };
+    update();
+    t._timer = setInterval(() => { s--; if (s <= 0) { clearInterval(t._timer); t.remove(); } else update(); }, 1000);
 }
 
 // ─── NOTIFICATION SOUND ───────────────────────────────────────────────────────
@@ -428,6 +564,12 @@ function addChatMessage(user, text, color) {
     m.appendChild(b); m.appendChild(s);
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
+    try {
+        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
+        history.push({ user, text, color });
+        if (history.length > 200) history.shift();
+        sessionStorage.setItem('ss-chat', JSON.stringify(history));
+    } catch (_) {}
 }
 
 // ─── EMOJI & TOAST ────────────────────────────────────────────────────────────
@@ -530,7 +672,7 @@ function injectUI() {
     // ── DOCK ─────────────────────────────────────────────────────────────────
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);';
+    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
 
     const mkBtn = (emoji, id, handler, tip) => {
         const b = document.createElement('button');
@@ -564,8 +706,9 @@ function injectUI() {
     sep.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0;';
     dock.appendChild(sep);
 
+    const emojiLabels = { '❤️': 'Love ❤️', '😂': 'Haha 😂', '🔥': 'Fire! 🔥', '😮': 'Wow 😮', '👏': 'Clap 👏' };
     ['❤️','😂','🔥','😮','👏'].forEach(em => {
-        dock.appendChild(mkBtn(em, '', () => chrome.runtime.sendMessage({ type: 'REACTION', emoji: em })));
+        dock.appendChild(mkBtn(em, '', () => chrome.runtime.sendMessage({ type: 'REACTION', emoji: em }), emojiLabels[em]));
     });
 
     // Now Playing label inside dock
@@ -597,7 +740,7 @@ function injectUI() {
     // ── SYNC INDICATOR ────────────────────────────────────────────────────────
     const syncInd = document.createElement('div');
     syncInd.id = 'ss-sync-ind';
-    syncInd.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.92);color:#fff;padding:6px 16px;border-radius:20px;font-size:12px;font-weight:600;z-index:999999;pointer-events:none;opacity:0;transition:opacity 0.4s ease;letter-spacing:0.04em;';
+    syncInd.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.95);color:#fff;padding:10px 24px;border-radius:24px;font-size:16px;font-weight:700;z-index:2147483645;pointer-events:none;opacity:0;transition:opacity 0.3s ease,transform 0.3s ease;letter-spacing:0.05em;box-shadow:0 4px 24px rgba(99,102,241,0.45);white-space:nowrap;';
     root.appendChild(syncInd);
 
     // ── CHAT PANEL ────────────────────────────────────────────────────────────
@@ -647,6 +790,12 @@ function injectUI() {
     sendBtn.onclick = sendMessage;
     chatInput.addEventListener('keydown',  e => e.stopPropagation());
     chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
+
+    // Restore chat history from this session
+    try {
+        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
+        history.forEach(m => addChatMessage(m.user, m.text, m.color));
+    } catch (_) {}
 
     // ── PARTICIPANTS PANEL ────────────────────────────────────────────────────
     const pP = document.createElement('div');
