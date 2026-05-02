@@ -2,81 +2,149 @@
  * SyncStream Pro - Page Context Fullscreen Intercept
  * Runs in MAIN world at document_start.
  *
- * Strategy:
- *   - TOP FRAME: do NOT intercept — let the site go fullscreen normally.
- *     content.js fullscreenchange handler will move ss-root into the element.
- *   - IFRAME: intercept and ask the top frame to go fullscreen on body instead,
- *     so ss-root (child of body) remains visible. CSS expands the iframe.
+ * Top frame  → normal fullscreen, content.js moves ss-root into the element.
+ * Iframe     → intercept requestFullscreen, ask top frame to do body fullscreen.
+ *              Also fake fullscreenElement + exitFullscreen so the player's
+ *              toggle logic (e.g. dblclick to exit) keeps working correctly.
  */
 (function () {
     if (window.__ssFullscreenPatched) return;
     window.__ssFullscreenPatched = true;
 
-    const isActive   = () => document.documentElement.hasAttribute('data-ss-active');
-    const isTopFrame = () => window === window.top;
+    var isActive   = function() { return document.documentElement.hasAttribute('data-ss-active'); };
+    var isTopFrame = function() { return window === window.top; };
 
-    // Capture originals before any patching
+    // ── Capture originals before any patching ──────────────────────────────
     var originals = {};
-    ['requestFullscreen', 'webkitRequestFullscreen', 'mozRequestFullScreen', 'msRequestFullscreen'].forEach(function (k) {
+    ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function(k){
         if (HTMLElement.prototype[k]) originals[k] = HTMLElement.prototype[k];
     });
 
-    function requestBodyFullscreen() {
+    function callOrigBodyFullscreen() {
         var fn = originals.requestFullscreen || originals.webkitRequestFullscreen ||
                  originals.mozRequestFullScreen || originals.msRequestFullscreen;
-        if (fn) return fn.call(document.body);
-        return Promise.reject(new Error('no fullscreen api'));
+        return fn ? fn.call(document.body) : Promise.reject();
     }
 
-    // Only patch for IFRAME context — top frame gets normal fullscreen behaviour
+    // ── IFRAME context ─────────────────────────────────────────────────────
     if (!isTopFrame()) {
-        Object.keys(originals).forEach(function (k) {
+        var ssActive = false; // true when top frame's body is fullscreen because of us
+
+        // 1. Intercept requestFullscreen — redirect to top frame
+        Object.keys(originals).forEach(function(k) {
             var orig = originals[k];
-            HTMLElement.prototype[k] = function () {
+            HTMLElement.prototype[k] = function() {
                 if (!isActive()) return orig.apply(this, arguments);
-                // Ask top frame to go fullscreen so ss-root stays visible
-                try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch (_) {}
+                try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch(_){}
                 return Promise.resolve();
             };
         });
 
         var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
         if (origWEFS) {
-            HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
+            HTMLVideoElement.prototype.webkitEnterFullscreen = function() {
                 if (!isActive()) return origWEFS.apply(this, arguments);
-                try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch (_) {}
+                try { window.top.postMessage({ type: 'SS_FS_REQUEST' }, '*'); } catch(_){}
             };
         }
+
+        // 2. Fake document.fullscreenElement so player toggle logic works
+        var fakeEl = null;
+        ['fullscreenElement','webkitFullscreenElement','mozFullScreenElement'].forEach(function(prop) {
+            var desc = Object.getOwnPropertyDescriptor(Document.prototype, prop) ||
+                       Object.getOwnPropertyDescriptor(document, prop);
+            if (!desc || !desc.get) return;
+            var orig = desc.get;
+            Object.defineProperty(document, prop, {
+                get: function() { return ssActive ? fakeEl || document.documentElement : orig.call(this); },
+                configurable: true
+            });
+        });
+
+        // 3. Intercept exitFullscreen — ask top frame to exit
+        var origExit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen;
+        if (origExit) {
+            var doExit = function() {
+                if (ssActive) {
+                    try { window.top.postMessage({ type: 'SS_FS_EXIT' }, '*'); } catch(_){}
+                    return Promise.resolve();
+                }
+                return origExit.call(document);
+            };
+            document.exitFullscreen           = doExit;
+            document.webkitExitFullscreen      = doExit;
+            document.mozCancelFullScreen       = doExit;
+        }
+
+        // 4. Receive fullscreen state changes from top frame
+        window.addEventListener('message', function(e) {
+            if (!e.data) return;
+            if (e.data.type === 'SS_FS_ENTER') {
+                ssActive = true;
+                fakeEl   = document.documentElement;
+                // Dispatch a synthetic fullscreenchange so player UI updates
+                try { document.dispatchEvent(new Event('fullscreenchange')); } catch(_){}
+                try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch(_){}
+            } else if (e.data.type === 'SS_FS_LEAVE') {
+                ssActive = false;
+                fakeEl   = null;
+                try { document.dispatchEvent(new Event('fullscreenchange')); } catch(_){}
+                try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch(_){}
+            }
+        });
     }
 
-    // Top frame: receive SS_FS_REQUEST from a child iframe
+    // ── TOP FRAME ──────────────────────────────────────────────────────────
     if (isTopFrame()) {
-        window.addEventListener('message', function (e) {
+        // Receive SS_FS_REQUEST from iframe
+        window.addEventListener('message', function(e) {
             if (!e.data || e.data.type !== 'SS_FS_REQUEST') return;
             if (!isActive()) return;
 
-            // Mark the source iframe so CSS expands it to fill the viewport
-            var marked = false;
+            // Mark the source iframe (for CSS expansion) and remember it
+            var targetIframe = null;
             try {
                 var iframes = document.querySelectorAll('iframe');
                 for (var i = 0; i < iframes.length; i++) {
                     if (iframes[i].contentWindow === e.source) {
                         iframes[i].setAttribute('data-ss-fs', '1');
-                        marked = true;
+                        targetIframe = iframes[i];
                         break;
                     }
                 }
-                if (!marked && iframes.length) {
-                    var largest = iframes[0];
+                if (!targetIframe && iframes.length) {
+                    // fallback: largest iframe
+                    targetIframe = iframes[0];
                     for (var j = 1; j < iframes.length; j++) {
                         if (iframes[j].offsetWidth * iframes[j].offsetHeight >
-                            largest.offsetWidth * largest.offsetHeight) largest = iframes[j];
+                            targetIframe.offsetWidth * targetIframe.offsetHeight) targetIframe = iframes[j];
                     }
-                    largest.setAttribute('data-ss-fs', '1');
+                    targetIframe.setAttribute('data-ss-fs', '1');
                 }
-            } catch (_) {}
+            } catch(_){}
 
-            requestBodyFullscreen();
+            callOrigBodyFullscreen();
+        });
+
+        // Notify iframe when fullscreen state changes
+        document.addEventListener('fullscreenchange', function() {
+            var entering = document.fullscreenElement === document.body;
+            document.querySelectorAll('iframe[data-ss-fs]').forEach(function(iframe) {
+                try { iframe.contentWindow.postMessage({ type: entering ? 'SS_FS_ENTER' : 'SS_FS_LEAVE' }, '*'); } catch(_){}
+            });
+            // Clean up marker when exiting
+            if (!entering) {
+                document.querySelectorAll('iframe[data-ss-fs]').forEach(function(iframe) {
+                    iframe.removeAttribute('data-ss-fs');
+                });
+            }
+        });
+
+        // Receive exit request from iframe
+        window.addEventListener('message', function(e) {
+            if (!e.data || e.data.type !== 'SS_FS_EXIT') return;
+            if (!isActive()) return;
+            try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch(_){}
         });
     }
 })();
