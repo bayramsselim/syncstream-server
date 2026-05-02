@@ -1,11 +1,14 @@
 /**
  * SyncStream Pro — Fullscreen intercept (MAIN world, document_start, all_frames)
  *
- * Top frame : no intercept — normal fullscreen, content.js moves ss-root.
- * Iframe    : redirect requestFullscreen to top-frame body fullscreen so
- *             ss-root (child of body) stays visible. The returned promise
- *             resolves only after body fullscreen is confirmed, so the
- *             player's toggle logic stays correct.
+ * Cross-origin iframes cannot transfer user-activation via postMessage, so
+ * document.body.requestFullscreen() would be rejected by the browser.
+ *
+ * Solution: CSS fake-fullscreen — position the iframe fixed over the viewport
+ * without touching the Fullscreen API. No user-activation needed.
+ *
+ * Top frame : receives SS_FS_REQ → expands iframe via inline CSS, sends SS_FS_ON.
+ * Iframe    : intercepts requestFullscreen → signals top frame, resolves when confirmed.
  */
 (function () {
     if (window.__ssFS) return;
@@ -13,60 +16,86 @@
 
     var isActive = function () { return document.documentElement.hasAttribute('data-ss-active'); };
 
-    /* ── TOP FRAME: no patching, just messaging ─────────────────────────── */
+    /* ── TOP FRAME ─────────────────────────────────────────────────────── */
     if (window === window.top) {
-        /* Receive enter request from iframe */
-        window.addEventListener('message', function (e) {
-            if (!e.data || e.data.type !== 'SS_FS_REQ' || !isActive()) return;
+        var fakeEl    = null;
+        var savedSt   = null;
+        var CSS_PROPS = ['position','top','left','right','bottom','width','height',
+                         'z-index','border','border-radius','transform','transition',
+                         'max-width','max-height'];
 
-            /* Mark the source iframe so CSS expands it */
-            try {
-                var found = false;
-                var iframes = document.querySelectorAll('iframe');
-                for (var i = 0; i < iframes.length; i++) {
-                    if (iframes[i].contentWindow === e.source) {
-                        iframes[i].setAttribute('data-ss-fs', '1');
-                        found = true; break;
-                    }
-                }
-                if (!found && iframes.length) {
-                    var big = iframes[0];
-                    for (var j = 1; j < iframes.length; j++)
-                        if (iframes[j].offsetWidth * iframes[j].offsetHeight > big.offsetWidth * big.offsetHeight) big = iframes[j];
-                    big.setAttribute('data-ss-fs', '1');
-                }
-            } catch (_) {}
+        function findFrame(source) {
+            var iframes = document.querySelectorAll('iframe');
+            for (var i = 0; i < iframes.length; i++) {
+                try { if (iframes[i].contentWindow === source) return iframes[i]; } catch (_) {}
+            }
+            if (!iframes.length) return null;
+            var big = iframes[0];
+            for (var j = 1; j < iframes.length; j++) {
+                if (iframes[j].offsetWidth * iframes[j].offsetHeight >
+                    big.offsetWidth  * big.offsetHeight) big = iframes[j];
+            }
+            return big;
+        }
 
-            /* Request body fullscreen using the original unpatched method */
-            var orig = HTMLElement.prototype.requestFullscreen       ||
-                       HTMLElement.prototype.webkitRequestFullscreen ||
-                       HTMLElement.prototype.mozRequestFullScreen;
-            if (orig) orig.call(document.body).catch(function () {});
-        });
-
-        /* Receive exit request from iframe */
-        window.addEventListener('message', function (e) {
-            if (!e.data || e.data.type !== 'SS_FS_EXIT' || !isActive()) return;
-            try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
-        });
-
-        /* Notify iframes of fullscreen state */
-        document.addEventListener('fullscreenchange', function () {
-            var entering = document.fullscreenElement === document.body;
-            document.querySelectorAll('iframe[data-ss-fs]').forEach(function (fr) {
-                try { fr.contentWindow.postMessage({ type: entering ? 'SS_FS_ON' : 'SS_FS_OFF' }, '*'); } catch (_) {}
+        function enterFake(fr) {
+            if (fakeEl) exitFake();
+            fakeEl   = fr;
+            savedSt  = {};
+            CSS_PROPS.forEach(function (p) {
+                savedSt[p] = { v: fr.style.getPropertyValue(p), pri: fr.style.getPropertyPriority(p) };
             });
-            if (!entering)
-                document.querySelectorAll('iframe[data-ss-fs]').forEach(function (fr) { fr.removeAttribute('data-ss-fs'); });
+            fr.style.setProperty('position',      'fixed',      'important');
+            fr.style.setProperty('top',           '0',          'important');
+            fr.style.setProperty('left',          '0',          'important');
+            fr.style.setProperty('right',         '0',          'important');
+            fr.style.setProperty('bottom',        '0',          'important');
+            fr.style.setProperty('width',         '100vw',      'important');
+            fr.style.setProperty('height',        '100vh',      'important');
+            fr.style.setProperty('max-width',     'none',       'important');
+            fr.style.setProperty('max-height',    'none',       'important');
+            fr.style.setProperty('z-index',       '2147483646', 'important');
+            fr.style.setProperty('border',        'none',       'important');
+            fr.style.setProperty('border-radius', '0',          'important');
+            fr.style.setProperty('transform',     'none',       'important');
+            fr.style.setProperty('transition',    'none',       'important');
+            fr.setAttribute('data-ss-fs', '1');
+            try { fr.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
+        }
+
+        function exitFake() {
+            if (!fakeEl) return;
+            var fr = fakeEl; fakeEl = null;
+            CSS_PROPS.forEach(function (p) {
+                if (savedSt[p] && savedSt[p].v) {
+                    fr.style.setProperty(p, savedSt[p].v, savedSt[p].pri);
+                } else {
+                    fr.style.removeProperty(p);
+                }
+            });
+            savedSt = null;
+            fr.removeAttribute('data-ss-fs');
+            try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
+        }
+
+        window.addEventListener('message', function (e) {
+            if (!e.data || !isActive()) return;
+            if      (e.data.type === 'SS_FS_REQ')  { var fr = findFrame(e.source); if (fr) enterFake(fr); }
+            else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
         });
+
+        /* Escape from top frame (e.g. when iframe doesn't have focus) */
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && fakeEl) exitFake();
+        });
+
         return;
     }
 
     /* ── IFRAME ─────────────────────────────────────────────────────────── */
-    var fsOn = false;
-    var pendingResolve = null; /* resolves the requestFullscreen promise */
+    var fsOn          = false;
+    var pendingResolve = null;
 
-    /* Receive state from top frame */
     window.addEventListener('message', function (e) {
         if (!e.data) return;
         if (e.data.type === 'SS_FS_ON' && !fsOn) {
@@ -79,6 +108,11 @@
             try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
             try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
         }
+    });
+
+    /* Escape key inside the iframe */
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && fsOn) fakeExit();
     });
 
     /* 1. Fake document.fullscreenElement */
@@ -108,50 +142,32 @@
     try { Object.defineProperty(document, 'webkitExitFullscreen', { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
     try { Object.defineProperty(document, 'mozCancelFullScreen',  { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
 
-    /* 3. Intercept requestFullscreen — promise resolves AFTER body enters FS */
-    var origRFS = HTMLElement.prototype.requestFullscreen       ||
-                  HTMLElement.prototype.webkitRequestFullscreen ||
-                  HTMLElement.prototype.mozRequestFullScreen;
-
+    /* 3. Intercept requestFullscreen — promise resolves once top frame confirms */
     function patchMethod(k) {
         var orig = HTMLElement.prototype[k];
         if (!orig) return;
         HTMLElement.prototype[k] = function () {
             if (!isActive()) return orig.apply(this, arguments);
-
-            /* Already in fake-fullscreen → treat as exit */
             if (fsOn) { fakeExit(); return Promise.resolve(); }
-
-            /* Request top frame to go body-fullscreen */
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
-
-            /* Return a promise that resolves when SS_FS_ON arrives */
             return new Promise(function (resolve) {
                 pendingResolve = resolve;
-                /* Safety timeout: if body FS fails for any reason, resolve so
-                   player doesn't hang, and fall back to original behavior */
+                /* Safety: resolve after 1 s so player never hangs */
                 setTimeout(function () {
-                    if (pendingResolve === resolve) {
-                        pendingResolve = null;
-                        /* Body FS failed — try original so player works normally */
-                        if (!fsOn) orig.apply(this, arguments);
-                        resolve();
-                    }
-                }.bind(this), 800);
+                    if (pendingResolve === resolve) { pendingResolve = null; resolve(); }
+                }, 1000);
             });
         };
     }
     ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(patchMethod);
 
-    /* Also patch webkitEnterFullscreen on video elements */
+    /* 4. webkitEnterFullscreen on video elements (Safari / some players) */
     var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
     if (origWEFS) {
         HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
             if (!isActive()) return origWEFS.apply(this, arguments);
             if (fsOn) { fakeExit(); return; }
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
-            pendingResolve = function () {};
-            setTimeout(function () { if (!fsOn) origWEFS.apply(this, arguments); }.bind(this), 800);
         };
     }
 })();
