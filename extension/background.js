@@ -54,7 +54,8 @@ function connectWebSocket() {
                     myUsername:      currentRoom?.myUsername,
                     myId:            me?.id || currentRoom?.myId,
                     isHost:          me?.isHost || false,
-                    nowPlaying:      data.nowPlaying || currentRoom?.nowPlaying
+                    nowPlaying:      data.nowPlaying    || currentRoom?.nowPlaying,
+                    nowPlayingUrl:   data.nowPlayingUrl || currentRoom?.nowPlayingUrl || ''
                 };
                 chrome.storage.local.set({ roomData: currentRoom });
                 const roomMsg = { type: 'ROOM_STATE', data: currentRoom };
@@ -62,7 +63,7 @@ function connectWebSocket() {
                 broadcastToTabs(roomMsg);
             }
             else if (data.type === 'NOW_PLAYING') {
-                if (currentRoom) { currentRoom.nowPlaying = data.title; broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom }); }
+                if (currentRoom) { currentRoom.nowPlaying = data.title; currentRoom.nowPlayingUrl = data.url || ''; broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom }); }
                 broadcastToTabs(data);
             }
             else if (data.type === 'ERROR') { broadcastToPopup({ type: 'JOIN_ERROR', message: data.message }); }

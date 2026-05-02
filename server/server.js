@@ -130,8 +130,9 @@ wss.on('connection', (ws) => {
 
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 const room = rooms.get(ws.roomId);
-                room.nowPlaying = (data.title || '').substring(0, 200);
-                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying }, null);
+                room.nowPlaying    = (data.title || '').substring(0, 200);
+                room.nowPlayingUrl = (data.url   || '').substring(0, 500);
+                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying, url: room.nowPlayingUrl }, null);
             }
         }
     });
@@ -162,7 +163,8 @@ function broadcastRoomUpdate(roomId) {
     }));
     broadcastToRoom(roomId, {
         type: 'ROOM_UPDATE', roomId,
-        users, hostControlOnly: room.hostControlOnly, nowPlaying: room.nowPlaying
+        users, hostControlOnly: room.hostControlOnly,
+        nowPlaying: room.nowPlaying, nowPlayingUrl: room.nowPlayingUrl || ''
     }, null);
 }
 

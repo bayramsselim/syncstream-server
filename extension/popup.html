@@ -60,7 +60,9 @@
 
         .np-box { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 10px 12px; }
         .np-label { font-size: 10px; color: #555; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 3px; }
-        .np-title { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .np-title { font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; display: block; }
+        .np-title[href]:not([href=""]):not([href="#"]) { color: #818cf8; cursor: pointer; }
+        .np-title[href]:not([href=""]):not([href="#"]):hover { color: #a5b4fc; text-decoration: underline; }
 
         .row { display: flex; gap: 8px; }
         .row button { flex: 1; }
@@ -111,7 +113,7 @@
 
         <div class="np-box">
             <div class="np-label">Now watching</div>
-            <div class="np-title" id="now-playing-title">Scanning...</div>
+            <a class="np-title" id="now-playing-title" href="#" target="_blank">Scanning...</a>
         </div>
 
         <div id="host-controls" style="display:none; align-items:center; gap:8px; font-size:12px; color:#aaa;">

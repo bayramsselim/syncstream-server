@@ -146,7 +146,8 @@ document.addEventListener('DOMContentLoaded', () => {
         el.btnCreate.disabled = false;
         el.btnJoin.disabled   = false;
         el.roomCodeDsp.textContent = room.roomId;
-        el.npTitle.textContent     = room.nowPlaying || 'Watching together...';
+        el.npTitle.textContent = room.nowPlaying || 'Watching together...';
+        el.npTitle.href = room.nowPlayingUrl || '#';
 
         el.userList.innerHTML = '';
         (room.users || []).forEach(u => {

@@ -256,33 +256,44 @@ function updateGalleryLayout() {
     const counter = document.getElementById('ss-gallery-count');
     if (!inner || !gallery) return;
 
-    const tiles = inner.querySelectorAll('[id^="ss-vid-"]');
-    const count = tiles.length;
+    const allTiles     = Array.from(inner.querySelectorAll('[id^="ss-vid-"]'));
+    const visibleTiles = allTiles.filter(t => t.style.display !== 'none');
+    const hiddenCount  = allTiles.length - visibleTiles.length;
+    const count        = visibleTiles.length;
 
-    if (count === 0) { gallery.style.display = 'none'; return; }
+    // Show/hide "Show All" button in gallery header
+    const showAllBtn = document.getElementById('ss-gallery-showall');
+    if (showAllBtn) showAllBtn.style.display = hiddenCount > 0 ? 'inline-block' : 'none';
+
+    if (allTiles.length === 0) { gallery.style.display = 'none'; return; }
     gallery.style.display = 'flex';
+
+    if (count === 0) {
+        // All hidden — show just the header
+        gallery.style.height = HEADER_H + 'px';
+        if (counter) counter.textContent = `0/${allTiles.length}`;
+        return;
+    }
 
     const { cols, tw, th } = getLayout(count);
     const rows = Math.ceil(count / cols);
 
-    // Resize gallery panel to fit tiles exactly
     const panelW = cols * tw + (cols - 1) * GAP + PAD * 2;
     const panelH = rows * th + (rows - 1) * GAP + PAD * 2 + HEADER_H;
-    gallery.style.width  = panelW + 'px';
+    gallery.style.width = panelW + 'px';
 
-    // Only expand height, don't shrink (avoids jitter when minimized)
     const isMinimized = inner.style.display === 'none';
     if (!isMinimized) gallery.style.height = panelH + 'px';
 
     inner.style.gridTemplateColumns = `repeat(${cols}, ${tw}px)`;
 
-    tiles.forEach(tile => {
+    visibleTiles.forEach(tile => {
         tile.style.width  = tw + 'px';
         tile.style.height = th + 'px';
         tile.style.opacity = '1';
     });
 
-    if (counter) counter.textContent = count;
+    if (counter) counter.textContent = hiddenCount > 0 ? `${count}/${allTiles.length}` : String(count);
 }
 
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
@@ -291,6 +302,12 @@ function addVideoTile(id, stream, name) {
     if (!inner) return;
 
     let tile = document.getElementById(`ss-vid-${id}`);
+    // If tile was manually hidden, restore it
+    if (tile && tile.style.display === 'none') {
+        tile.style.display = '';
+        requestAnimationFrame(() => { tile.style.opacity = '1'; });
+        updateGalleryLayout();
+    }
     if (!tile) {
         tile = document.createElement('div');
         tile.id = `ss-vid-${id}`;
@@ -312,7 +329,7 @@ function addVideoTile(id, stream, name) {
         hideBtn.textContent = '✕';
         hideBtn.title = 'Hide';
         hideBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.55);border:none;color:#fff;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;transition:background 0.15s;z-index:2;';
-        hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.remove(); updateGalleryLayout(); }, 280); };
+        hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.style.display = 'none'; updateGalleryLayout(); }, 280); };
         tile.appendChild(hideBtn);
 
         // Volume overlay (bottom, remote only) — appears on hover
@@ -668,12 +685,32 @@ function injectUI() {
         else gallery.style.height = '34px';
     };
 
+    const showAllBtn = document.createElement('button');
+    showAllBtn.id = 'ss-gallery-showall';
+    showAllBtn.textContent = 'Hepsini Göster';
+    showAllBtn.style.cssText = 'display:none;background:rgba(99,102,241,0.25);border:none;color:#818cf8;cursor:pointer;font-size:9px;font-weight:700;padding:2px 7px;border-radius:8px;letter-spacing:0.04em;transition:background 0.15s;flex-shrink:0;';
+    showAllBtn.onmouseenter = () => { showAllBtn.style.background = 'rgba(99,102,241,0.45)'; };
+    showAllBtn.onmouseleave = () => { showAllBtn.style.background = 'rgba(99,102,241,0.25)'; };
+    showAllBtn.onclick = (e) => {
+        e.stopPropagation();
+        const gi = document.getElementById('ss-grid-inner');
+        if (!gi) return;
+        gi.querySelectorAll('[id^="ss-vid-"]').forEach(t => {
+            if (t.style.display === 'none') { t.style.display = ''; t.style.opacity = '0'; requestAnimationFrame(() => { t.style.opacity = '1'; }); }
+        });
+        updateGalleryLayout();
+    };
+
     const titleWrap = document.createElement('span');
     titleWrap.style.cssText = 'display:flex;align-items:center;gap:0;';
     titleWrap.appendChild(galleryTitle);
     titleWrap.appendChild(galleryCount);
+    const headerRight = document.createElement('span');
+    headerRight.style.cssText = 'display:flex;align-items:center;gap:6px;';
+    headerRight.appendChild(showAllBtn);
+    headerRight.appendChild(galleryMinBtn);
     galleryHeader.appendChild(titleWrap);
-    galleryHeader.appendChild(galleryMinBtn);
+    galleryHeader.appendChild(headerRight);
     gallery.appendChild(galleryHeader);
 
     const gridInner = document.createElement('div');
@@ -718,7 +755,7 @@ function mainLoop() {
         if (h1?.innerText) title = h1.innerText.trim();
         if (title && title !== lastTitle && title !== document.location.hostname) {
             lastTitle = title;
-            chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title }).catch(() => {});
+            chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title, url: window.location.href }).catch(() => {});
             const npEl = document.getElementById('ss-np-title');
             if (npEl) npEl.textContent = title;
         }
