@@ -111,7 +111,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Join Room ─────────────────────────────────────────────────────────────
     el.btnJoin.onclick = () => {
         const code = el.joinCodeIn.value.trim().toUpperCase();
-        if (code.length < 6) { el.joinCodeIn.focus(); return; }
+        if (code.length < 4) { el.joinCodeIn.focus(); return; }
         el.btnJoin.disabled = true;
         el.connectingMsg.style.display = 'block';
         chrome.runtime.sendMessage({ type: 'JOIN_ROOM', roomId: code, username: myName });
@@ -140,7 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const link = el.btnShare.dataset.link;
         if (!link) return;
         navigator.clipboard.writeText(link).then(() => {
-            el.btnShare.textContent = '✓ Link Kopyalandı';
+            el.btnShare.textContent = '✓ Link Copied';
             setTimeout(() => { el.btnShare.textContent = 'Share Link'; }, 2000);
         });
     };

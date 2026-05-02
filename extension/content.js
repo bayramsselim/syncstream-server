@@ -45,8 +45,9 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
     if (res?.myId) {
         roomState = res;
         if (IS_TOP_FRAME) {
+            injectUI();
+            syncAvatarTiles(res.users || []);
             initPeers();
-            // Restore mic/cam state after cross-page navigation
             chrome.storage.session.get(['ssMicOn', 'ssCamOn'], (stored) => {
                 if (stored.ssMicOn || stored.ssCamOn) {
                     isMicOn = stored.ssMicOn || false;
@@ -56,7 +57,6 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
             });
         }
     } else if (IS_TOP_FRAME) {
-        // Auto-join if invite code is in URL
         try {
             const code = new URL(window.location.href).searchParams.get('ss_room');
             if (code) setTimeout(() => showJoinPrompt(code.toUpperCase()), 1500);
@@ -86,8 +86,8 @@ chrome.runtime.onMessage.addListener((msg) => {
         // Host change notification
         const newHost = (roomState.users || []).find(u => u.isHost);
         if (newHost && prevHostId && newHost.id !== prevHostId) {
-            if (newHost.id === roomState.myId) showToast('👑 Artık sen hostsun!', '#f59e0b');
-            else showToast(`👑 ${newHost.username} yeni host`, '#f59e0b');
+            if (newHost.id === roomState.myId) showToast('👑 You are now the host!', '#f59e0b');
+            else showToast(`👑 ${newHost.username} is the new host`, '#f59e0b');
         }
         lastHostId = newHost?.id || null;
     }
@@ -99,7 +99,7 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
     else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
     else if (msg.type === 'HOST_NAVIGATE') showNavigateToast(msg.url, msg.title, msg.username);
-    else if (msg.type === 'JOIN_ERROR')    showToast(`❌ ${msg.message || 'Odaya katılınamadı'}`, '#ef4444');
+    else if (msg.type === 'JOIN_ERROR')    showToast(`❌ ${msg.message || 'Could not join room'}`, '#ef4444');
 });
 
 // ─── VIDEO SYNC ───────────────────────────────────────────────────────────────
@@ -171,7 +171,23 @@ async function createPeer(tid, name) {
             chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { description: pc.localDescription } });
         } catch (e) { console.error('[SS] Negotiation:', e); } finally { pObj.makingOffer = false; }
     };
-    pc.oniceconnectionstatechange = () => { if (pc.iceConnectionState === 'failed') pc.restartIce(); };
+    pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'failed') pc.restartIce();
+    };
+    pc.onconnectionstatechange = () => {
+        const tile = document.getElementById(`ss-vid-${tid}`);
+        const sig  = tile?.querySelector('.ss-signal');
+        if (pc.connectionState === 'connected') {
+            if (sig) { sig.style.background = '#10b981'; sig.style.boxShadow = '0 0 5px #10b981'; sig.title = 'Good connection'; }
+        } else if (pc.connectionState === 'failed') {
+            if (sig) { sig.style.background = '#ef4444'; sig.style.boxShadow = '0 0 5px #ef4444'; sig.title = 'Connection failed'; }
+            // Attempt renegotiation by closing and recreating peer
+            pc.close();
+            delete peerConnections[tid];
+            const u = roomState?.users?.find(x => x.id === tid);
+            if (u) setTimeout(() => createPeer(tid, u.username), 2000);
+        }
+    };
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     startStatsMonitor(tid, pc);
     return pObj;
@@ -382,7 +398,7 @@ function createTileShell(id, name, color) {
         // Signal quality dot
         const sig = document.createElement('div');
         sig.className = 'ss-signal';
-        sig.title = 'Bağlantı bekleniyor';
+        sig.title = 'Awaiting stream';
         sig.style.cssText = 'position:absolute;top:6px;left:6px;width:7px;height:7px;border-radius:50%;background:#555;z-index:3;transition:background 0.5s,box-shadow 0.5s;';
         tile.appendChild(sig);
     }
@@ -396,7 +412,7 @@ function createTileShell(id, name, color) {
 
     // Hide button
     const hideBtn = document.createElement('button');
-    hideBtn.textContent = '✕'; hideBtn.title = 'Gizle';
+    hideBtn.textContent = '✕'; hideBtn.title = 'Hide';
     hideBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.55);border:none;color:#fff;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;transition:background 0.15s;z-index:3;';
     hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.style.display = 'none'; updateGalleryLayout(); }, 280); };
     tile.appendChild(hideBtn);
@@ -444,8 +460,12 @@ function createTileShell(id, name, color) {
 }
 
 function addVideoTile(id, stream, name) {
+    if (!document.getElementById('ss-grid-inner')) {
+        // UI not yet injected — retry after injectUI has a chance to run
+        setTimeout(() => addVideoTile(id, stream, name), 200);
+        return;
+    }
     const inner = document.getElementById('ss-grid-inner');
-    if (!inner) return;
 
     let tile = document.getElementById(`ss-vid-${id}`);
     if (tile && tile.style.display === 'none') {
@@ -524,7 +544,7 @@ function removeVideoTile(id) {
     const tile = document.getElementById(`ss-vid-${id}`);
     if (tile) {
         const sig = tile.querySelector('.ss-signal');
-        if (sig) { sig.style.background = '#555'; sig.style.boxShadow = 'none'; sig.title = 'Bağlantı bekleniyor'; }
+        if (sig) { sig.style.background = '#555'; sig.style.boxShadow = 'none'; sig.title = 'Awaiting stream'; }
     }
 }
 
@@ -567,7 +587,7 @@ function startStatsMonitor(tid, pc) {
             }
 
             const clr  = { good: '#10b981', medium: '#f59e0b', poor: '#ef4444' }[quality];
-            const tips = { good: 'Bağlantı iyi', medium: 'Bağlantı kararsız', poor: 'Bağlantı zayıf' }[quality];
+            const tips = { good: 'Good connection', medium: 'Unstable connection', poor: 'Poor connection' }[quality];
             sig.style.background = clr;
             sig.style.boxShadow  = `0 0 5px ${clr}`;
             sig.title = tips;
@@ -586,7 +606,7 @@ function showReconnectToast(sec) {
     }
     let s = sec;
     clearInterval(t._timer);
-    const update = () => { t.textContent = `⚡ Bağlantı kesildi — ${s}s sonra yeniden bağlanıyor...`; };
+    const update = () => { t.textContent = `⚡ Disconnected — reconnecting in ${s}s...`; };
     update();
     t._timer = setInterval(() => { s--; if (s <= 0) { clearInterval(t._timer); t.remove(); } else update(); }, 1000);
 }
@@ -601,14 +621,14 @@ function showJoinPrompt(code) {
 
     const ttl = document.createElement('div');
     ttl.style.cssText = 'font-size:13px;font-weight:700;color:#fff;';
-    ttl.textContent = '🎬 Odaya davet edildiniz';
+    ttl.textContent = '🎬 You have been invited to a room';
 
     const sub = document.createElement('div');
     sub.style.cssText = 'font-size:11px;color:#555;margin-top:-6px;';
-    sub.textContent = `Oda kodu: ${code}`;
+    sub.textContent = `Room code: ${code}`;
 
     const inp = document.createElement('input');
-    inp.placeholder = 'Adın...'; inp.maxLength = 24; inp.autocomplete = 'off';
+    inp.placeholder = 'Your name...'; inp.maxLength = 24; inp.autocomplete = 'off';
     inp.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#fff;padding:10px 12px;border-radius:10px;font-size:13px;outline:none;width:100%;box-sizing:border-box;transition:border-color 0.2s;';
     inp.onfocus = () => { inp.style.borderColor = '#6366f1'; };
     inp.onblur  = () => { inp.style.borderColor = 'rgba(255,255,255,0.1)'; };
@@ -617,14 +637,14 @@ function showJoinPrompt(code) {
     row.style.cssText = 'display:flex;gap:8px;';
 
     const noBtn = document.createElement('button');
-    noBtn.textContent = 'Hayır';
+    noBtn.textContent = 'No Thanks';
     noBtn.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:none;color:#aaa;padding:10px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;transition:background 0.15s;';
     noBtn.onmouseenter = () => { noBtn.style.background = 'rgba(255,255,255,0.13)'; };
     noBtn.onmouseleave = () => { noBtn.style.background = 'rgba(255,255,255,0.07)'; };
     noBtn.onclick = () => box.remove();
 
     const joinBtn = document.createElement('button');
-    joinBtn.textContent = 'Katıl →';
+    joinBtn.textContent = 'Join →';
     joinBtn.style.cssText = 'flex:2;background:#6366f1;border:none;color:#fff;padding:10px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:700;transition:background 0.15s;';
     joinBtn.onmouseenter = () => { joinBtn.style.background = '#4f46e5'; };
     joinBtn.onmouseleave = () => { joinBtn.style.background = '#6366f1'; };
@@ -661,7 +681,7 @@ function showNavigateToast(url, title, username) {
 
     const top = document.createElement('div');
     top.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px;color:#aaa;';
-    top.innerHTML = `<span style="font-size:18px;">🎬</span><span><b style="color:#fff;">${username || 'Host'}</b> yeni bir videoya geçiyor</span>`;
+    top.innerHTML = `<span style="font-size:18px;">🎬</span><span><b style="color:#fff;">${username || 'Host'}</b> is navigating to a new video</span>`;
 
     const titleEl = document.createElement('div');
     titleEl.style.cssText = 'font-size:12px;color:#818cf8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
@@ -674,13 +694,13 @@ function showNavigateToast(url, title, username) {
     countdown.style.cssText = 'font-size:11px;color:#555;flex:1;';
 
     const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'İptal';
+    cancelBtn.textContent = 'Cancel';
     cancelBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:background 0.15s;flex-shrink:0;';
     cancelBtn.onmouseenter = () => { cancelBtn.style.background = 'rgba(255,255,255,0.16)'; };
     cancelBtn.onmouseleave = () => { cancelBtn.style.background = 'rgba(255,255,255,0.08)'; };
 
     const goBtn = document.createElement('button');
-    goBtn.textContent = 'Şimdi Geç';
+    goBtn.textContent = 'Go Now';
     goBtn.style.cssText = 'background:#6366f1;border:none;color:#fff;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s;flex-shrink:0;';
     goBtn.onmouseenter = () => { goBtn.style.background = '#4f46e5'; };
     goBtn.onmouseleave = () => { goBtn.style.background = '#6366f1'; };
@@ -694,7 +714,7 @@ function showNavigateToast(url, title, username) {
     document.body.appendChild(t);
 
     let s = 5;
-    const update = () => { countdown.textContent = `${s}s sonra otomatik geçilecek`; };
+    const update = () => { countdown.textContent = `Auto-navigating in ${s}s`; };
     update();
 
     const navigate = () => { clearInterval(t._timer); t.remove(); window.location.href = url; };
@@ -829,7 +849,7 @@ document.addEventListener('keydown', (e) => {
             if (chat) { chat.style.display = isChatOpen ? 'flex' : 'none'; if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); } }
             updateButtons();
         },
-        'p': () => { const p = document.getElementById('ss-participants'); if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none'; }
+        'p': () => { const g = document.getElementById('ss-gallery'); if (g) { const v = g.style.display !== 'none' && g.style.display !== ''; g.style.display = v ? 'none' : 'flex'; } }
     };
 
     const handler = actions[e.key.toLowerCase()];
@@ -886,7 +906,12 @@ function injectUI() {
     dock.appendChild(mkBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },          'Mic (Alt+M)'));
     dock.appendChild(mkBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },          'Camera (Alt+C)'));
     dock.appendChild(mkBtn('🖥',  'ss-b-screen', () => toggleScreenShare(),                             'Screen Share (Alt+S)'));
-    dock.appendChild(mkBtn('👥', 'ss-b-people', () => { const p = document.getElementById('ss-participants'); if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none'; }, 'Participants (Alt+P)'));
+    dock.appendChild(mkBtn('👥', 'ss-b-people', () => {
+        const g = document.getElementById('ss-gallery');
+        if (!g) return;
+        const visible = g.style.display !== 'none' && g.style.display !== '';
+        g.style.display = visible ? 'none' : 'flex';
+    }, 'Participants (Alt+P)'));
 
     const sep = document.createElement('div');
     sep.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0;';
@@ -1048,7 +1073,7 @@ function injectUI() {
 
     const showAllBtn = document.createElement('button');
     showAllBtn.id = 'ss-gallery-showall';
-    showAllBtn.textContent = 'Hepsini Göster';
+    showAllBtn.textContent = 'Show All';
     showAllBtn.style.cssText = 'display:none;background:rgba(99,102,241,0.25);border:none;color:#818cf8;cursor:pointer;font-size:9px;font-weight:700;padding:2px 7px;border-radius:8px;letter-spacing:0.04em;transition:background 0.15s;flex-shrink:0;';
     showAllBtn.onmouseenter = () => { showAllBtn.style.background = 'rgba(99,102,241,0.45)'; };
     showAllBtn.onmouseleave = () => { showAllBtn.style.background = 'rgba(99,102,241,0.25)'; };
