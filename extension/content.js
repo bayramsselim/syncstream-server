@@ -237,60 +237,96 @@ function makeDraggable(el, handle) {
     });
 }
 
+// ─── GALLERY LAYOUT ───────────────────────────────────────────────────────────
+// Returns grid columns and tile dimensions based on participant count
+function getLayout(count) {
+    if (count <= 1) return { cols: 1, tw: 300, th: 225 };
+    if (count <= 2) return { cols: 2, tw: 220, th: 165 };
+    if (count <= 4) return { cols: 2, tw: 190, th: 143 };
+    if (count <= 6) return { cols: 3, tw: 160, th: 120 };
+    if (count <= 9) return { cols: 3, tw: 148, th: 111 };
+    return              { cols: 4, tw: 130, th:  98 };
+}
+
+const GAP = 6, PAD = 8, HEADER_H = 34;
+
+function updateGalleryLayout() {
+    const inner   = document.getElementById('ss-grid-inner');
+    const gallery = document.getElementById('ss-gallery');
+    const counter = document.getElementById('ss-gallery-count');
+    if (!inner || !gallery) return;
+
+    const tiles = inner.querySelectorAll('[id^="ss-vid-"]');
+    const count = tiles.length;
+
+    if (count === 0) { gallery.style.display = 'none'; return; }
+    gallery.style.display = 'flex';
+
+    const { cols, tw, th } = getLayout(count);
+    const rows = Math.ceil(count / cols);
+
+    // Resize gallery panel to fit tiles exactly
+    const panelW = cols * tw + (cols - 1) * GAP + PAD * 2;
+    const panelH = rows * th + (rows - 1) * GAP + PAD * 2 + HEADER_H;
+    gallery.style.width  = panelW + 'px';
+
+    // Only expand height, don't shrink (avoids jitter when minimized)
+    const isMinimized = inner.style.display === 'none';
+    if (!isMinimized) gallery.style.height = panelH + 'px';
+
+    inner.style.gridTemplateColumns = `repeat(${cols}, ${tw}px)`;
+
+    tiles.forEach(tile => {
+        tile.style.width  = tw + 'px';
+        tile.style.height = th + 'px';
+        tile.style.opacity = '1';
+    });
+
+    if (counter) counter.textContent = count;
+}
+
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
 function addVideoTile(id, stream, name) {
-    const grid = document.getElementById('ss-grid');
-    if (!grid) return;
+    const inner = document.getElementById('ss-grid-inner');
+    if (!inner) return;
+
     let tile = document.getElementById(`ss-vid-${id}`);
     if (!tile) {
-        const count = document.querySelectorAll('[id^="ss-vid-"]').length;
         tile = document.createElement('div');
         tile.id = `ss-vid-${id}`;
-        tile.style.cssText = `position:fixed;top:${20 + count * 150}px;right:20px;width:180px;height:135px;background:#000;border-radius:12px;overflow:visible;border:1px solid rgba(255,255,255,0.12);pointer-events:auto;box-shadow:0 8px 24px rgba(0,0,0,0.6);z-index:2147483640;opacity:0;transition:opacity 0.3s;`;
-
-        const inner = document.createElement('div');
-        inner.style.cssText = 'width:100%;height:100%;border-radius:12px;overflow:hidden;position:relative;';
-        tile.appendChild(inner);
+        tile.style.cssText = 'background:#000;border-radius:10px;overflow:hidden;position:relative;flex-shrink:0;transition:width 0.3s,height 0.3s,opacity 0.25s;opacity:0;';
 
         const v = document.createElement('video');
         v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
         v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:block;';
-        inner.appendChild(v);
+        tile.appendChild(v);
 
-        // Label
+        // Name label
         const lbl = document.createElement('div');
         lbl.textContent = name;
-        lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:4px;pointer-events:none;';
-        inner.appendChild(lbl);
+        lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 7px;border-radius:4px;pointer-events:none;letter-spacing:0.02em;';
+        tile.appendChild(lbl);
 
-        // Drag handle
-        const handle = document.createElement('div');
-        handle.style.cssText = 'position:absolute;top:0;left:0;right:0;height:30px;z-index:2;';
-        tile.appendChild(handle);
-        makeDraggable(tile, handle);
+        // Hide button (top-right)
+        const hideBtn = document.createElement('button');
+        hideBtn.textContent = '✕';
+        hideBtn.title = 'Hide';
+        hideBtn.style.cssText = 'position:absolute;top:6px;right:6px;width:20px;height:20px;border-radius:50%;background:rgba(0,0,0,0.55);border:none;color:#fff;font-size:10px;cursor:pointer;display:none;align-items:center;justify-content:center;transition:background 0.15s;z-index:2;';
+        hideBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => { tile.remove(); updateGalleryLayout(); }, 280); };
+        tile.appendChild(hideBtn);
 
-        // Close button
-        const closeBtn = document.createElement('button');
-        closeBtn.textContent = '✕';
-        closeBtn.style.cssText = 'position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;background:#ef4444;border:none;color:#fff;font-size:11px;cursor:pointer;z-index:3;box-shadow:0 2px 8px rgba(0,0,0,0.5);transition:transform 0.15s;';
-        closeBtn.onmouseenter = () => closeBtn.style.transform = 'scale(1.15)';
-        closeBtn.onmouseleave = () => closeBtn.style.transform = 'scale(1)';
-        closeBtn.onclick = (e) => { e.stopPropagation(); tile.style.opacity = '0'; setTimeout(() => tile.remove(), 300); };
-        tile.appendChild(closeBtn);
-
-        // Volume slider (remote tiles only) — appears on hover
+        // Volume overlay (bottom, remote only) — appears on hover
         if (id !== 'local') {
-            const volWrap = document.createElement('div');
-            volWrap.style.cssText = 'position:absolute;bottom:-28px;left:0;right:0;display:flex;align-items:center;gap:6px;padding:0 6px;opacity:0;transition:opacity 0.2s;pointer-events:auto;';
+            const volBar = document.createElement('div');
+            volBar.style.cssText = 'position:absolute;bottom:0;left:0;right:0;padding:6px 8px;display:flex;align-items:center;gap:6px;background:linear-gradient(transparent,rgba(0,0,0,0.7));opacity:0;transition:opacity 0.2s;pointer-events:auto;';
             const volIcon = document.createElement('span');
-            volIcon.textContent = '🔊';
-            volIcon.style.cssText = 'font-size:11px;cursor:pointer;flex-shrink:0;';
+            volIcon.textContent = '🔊'; volIcon.style.cssText = 'font-size:11px;cursor:pointer;flex-shrink:0;color:#fff;';
             const volSlider = document.createElement('input');
             volSlider.type = 'range'; volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.05'; volSlider.value = '1';
             volSlider.style.cssText = 'flex:1;height:3px;cursor:pointer;accent-color:#6366f1;';
             volSlider.oninput = () => {
                 const vEl = document.getElementById(`ss-v-${id}`);
-                if (vEl) { vEl.volume = parseFloat(volSlider.value); vEl.muted = parseFloat(volSlider.value) === 0; }
+                if (vEl) { vEl.volume = parseFloat(volSlider.value); vEl.muted = vEl.volume === 0; }
                 volIcon.textContent = parseFloat(volSlider.value) === 0 ? '🔇' : '🔊';
             };
             volIcon.onclick = () => {
@@ -300,16 +336,18 @@ function addVideoTile(id, stream, name) {
                 volSlider.value = vEl.muted ? '0' : '1';
                 volIcon.textContent = vEl.muted ? '🔇' : '🔊';
             };
-            volWrap.appendChild(volIcon);
-            volWrap.appendChild(volSlider);
-            tile.appendChild(volWrap);
+            volBar.appendChild(volIcon); volBar.appendChild(volSlider);
+            tile.appendChild(volBar);
 
-            tile.onmouseenter = () => { volWrap.style.opacity = '1'; };
-            tile.onmouseleave = () => { volWrap.style.opacity = '0'; };
+            tile.onmouseenter = () => { volBar.style.opacity = '1'; hideBtn.style.display = 'flex'; };
+            tile.onmouseleave = () => { volBar.style.opacity = '0'; hideBtn.style.display = 'none'; };
+        } else {
+            tile.onmouseenter = () => { hideBtn.style.display = 'flex'; };
+            tile.onmouseleave = () => { hideBtn.style.display = 'none'; };
         }
 
-        grid.appendChild(tile);
-        requestAnimationFrame(() => { tile.style.opacity = '1'; });
+        inner.appendChild(tile);
+        updateGalleryLayout();
     }
 
     const vEl = document.getElementById(`ss-v-${id}`);
@@ -323,7 +361,7 @@ function removeVideoTile(id) {
     const el = document.getElementById(`ss-vid-${id}`);
     if (!el) return;
     el.style.opacity = '0';
-    setTimeout(() => el.remove(), 300);
+    setTimeout(() => { el.remove(); updateGalleryLayout(); }, 280);
 }
 
 // ─── NOTIFICATION SOUND ───────────────────────────────────────────────────────
@@ -600,11 +638,51 @@ function injectUI() {
     root.appendChild(pP);
     makeDraggable(pP);
 
-    // ── VIDEO GRID ────────────────────────────────────────────────────────────
-    const grid = document.createElement('div');
-    grid.id = 'ss-grid';
-    grid.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;pointer-events:none;';
-    root.appendChild(grid);
+    // ── VIDEO GALLERY ─────────────────────────────────────────────────────────
+    const gallery = document.createElement('div');
+    gallery.id = 'ss-gallery';
+    gallery.style.cssText = 'position:fixed;top:20px;right:20px;background:rgba(6,6,14,0.92);border:1px solid rgba(255,255,255,0.1);border-radius:14px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);overflow:hidden;z-index:2147483640;transition:width 0.3s,height 0.3s;min-width:80px;';
+
+    const galleryHeader = document.createElement('div');
+    galleryHeader.style.cssText = 'height:34px;padding:0 10px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;cursor:grab;user-select:none;';
+    const galleryTitle = document.createElement('span');
+    galleryTitle.style.cssText = 'font-size:10px;font-weight:700;color:#6366f1;letter-spacing:0.08em;';
+    galleryTitle.textContent = 'PARTICIPANTS';
+    const galleryCount = document.createElement('span');
+    galleryCount.id = 'ss-gallery-count';
+    galleryCount.style.cssText = 'font-size:10px;color:#555;margin-left:5px;';
+    galleryCount.textContent = '0';
+    const galleryMinBtn = document.createElement('button');
+    galleryMinBtn.textContent = '−';
+    galleryMinBtn.title = 'Minimize';
+    galleryMinBtn.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;font-size:15px;padding:0 2px;line-height:1;transition:color 0.15s;flex-shrink:0;';
+    galleryMinBtn.onmouseenter = () => { galleryMinBtn.style.color = '#fff'; };
+    galleryMinBtn.onmouseleave = () => { galleryMinBtn.style.color = '#555'; };
+    let galleryMinimized = false;
+    galleryMinBtn.onclick = (e) => {
+        e.stopPropagation();
+        galleryMinimized = !galleryMinimized;
+        gridInner.style.display = galleryMinimized ? 'none' : 'grid';
+        galleryMinBtn.textContent = galleryMinimized ? '+' : '−';
+        if (!galleryMinimized) updateGalleryLayout();
+        else gallery.style.height = '34px';
+    };
+
+    const titleWrap = document.createElement('span');
+    titleWrap.style.cssText = 'display:flex;align-items:center;gap:0;';
+    titleWrap.appendChild(galleryTitle);
+    titleWrap.appendChild(galleryCount);
+    galleryHeader.appendChild(titleWrap);
+    galleryHeader.appendChild(galleryMinBtn);
+    gallery.appendChild(galleryHeader);
+
+    const gridInner = document.createElement('div');
+    gridInner.id = 'ss-grid-inner';
+    gridInner.style.cssText = 'display:grid;gap:6px;padding:8px;box-sizing:content-box;';
+    gallery.appendChild(gridInner);
+
+    root.appendChild(gallery);
+    makeDraggable(gallery, galleryHeader);
 
     // ── KEYBOARD SHORTCUT TOOLTIP ─────────────────────────────────────────────
     const kbHint = document.createElement('div');
