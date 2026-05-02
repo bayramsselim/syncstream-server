@@ -52,13 +52,16 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
             injectUI();
             syncAvatarTiles(res.users || []);
             initPeers();
-            chrome.storage.session.get(['ssMicOn', 'ssCamOn'], (stored) => {
-                if (stored.ssMicOn || stored.ssCamOn) {
-                    isMicOn = stored.ssMicOn || false;
-                    isCamOn = stored.ssCamOn || false;
-                    updateMedia();
-                }
-            });
+            try {
+                chrome.storage.session.get(['ssMicOn', 'ssCamOn'], (stored) => {
+                    if (chrome.runtime.lastError || !stored) return;
+                    if (stored.ssMicOn || stored.ssCamOn) {
+                        isMicOn = stored.ssMicOn || false;
+                        isCamOn = stored.ssCamOn || false;
+                        updateMedia();
+                    }
+                });
+            } catch (_) { /* storage.session unavailable in this context */ }
         }
     } else if (IS_TOP_FRAME) {
         try {

@@ -219,6 +219,11 @@
                 try { fr.contentWindow.postMessage(msg, '*'); } catch (_) {}
             });
         }
+        /* Reply to iframes asking on init (avoids 1.5s broadcast race). */
+        window.addEventListener('message', function (e) {
+            if (!e.data || e.data.type !== 'SS_ASK') return;
+            try { e.source.postMessage({ type: isActive() ? 'SS_ACTIVE' : 'SS_INACTIVE' }, '*'); } catch (_) {}
+        });
         setInterval(broadcastActive, 1500);
         new MutationObserver(broadcastActive).observe(document.documentElement, {
             attributes: true, attributeFilter: ['data-ss-active']
@@ -240,6 +245,17 @@
             try { fr.contentWindow.postMessage(msg, '*'); } catch (_) {}
         });
     }
+
+    /* Ask the parent (and ultimately top frame) for the current SS_ACTIVE state.
+       Closes the broadcast race for late-loaded iframes — by the time we ask,
+       the top frame's listener is already in place. */
+    try { window.parent.postMessage({ type: 'SS_ASK' }, '*'); } catch (_) {}
+    /* Forward SS_ASK from descendant iframes up the chain */
+    window.addEventListener('message', function (e) {
+        if (e.data && e.data.type === 'SS_ASK') {
+            try { window.parent.postMessage({ type: 'SS_ASK' }, '*'); } catch (_) {}
+        }
+    });
 
     window.addEventListener('message', function (e) {
         if (!e.data) return;
