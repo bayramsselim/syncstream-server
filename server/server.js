@@ -1,7 +1,7 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
-const VERSION = '6char-codes';
+const VERSION = '6char-codes-v2';
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/ping') {
