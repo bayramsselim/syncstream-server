@@ -24,20 +24,17 @@ wss.on('connection', (ws) => {
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
-            console.log('Received:', data.type, 'from', ws.username || ws.id);
             
             if (data.type === 'CREATE_ROOM') {
                 const roomId = generateRoomId();
                 ws.roomId = roomId;
                 ws.username = data.username || 'Anonymous';
-                
                 rooms.set(roomId, {
                     host: ws.id,
                     clients: new Set([ws]),
                     nowPlaying: 'Waiting for video...',
                     hostControlOnly: false
                 });
-                
                 broadcastRoomUpdate(roomId);
             } 
             else if (data.type === 'JOIN_ROOM') {
@@ -47,97 +44,31 @@ wss.on('connection', (ws) => {
                     ws.username = data.username || 'Anonymous';
                     const room = rooms.get(roomId);
                     room.clients.add(ws);
-                    
                     broadcastRoomUpdate(roomId);
-                    
-                    // Notify everyone that someone joined
-                    broadcastToRoom(roomId, {
-                        type: 'TOAST',
-                        message: `${ws.username} joined the room!`,
-                        color: ws.color
-                    }, ws);
-
-                    ws.send(JSON.stringify({
-                        type: 'NOW_PLAYING',
-                        title: room.nowPlaying
-                    }));
+                    broadcastToRoom(roomId, { type: 'TOAST', message: `${ws.username} joined!`, color: ws.color }, null);
                 } else {
                     ws.send(JSON.stringify({ type: 'ERROR', message: 'Room not found' }));
                 }
             } 
-            else if (data.type === 'LEAVE_ROOM') {
-                leaveRoom(ws);
-            }
             else if (data.type === 'PLAYER_EVENT') {
                 if (rooms.has(data.roomId)) {
                     const room = rooms.get(data.roomId);
-                    // If hostControlOnly is true, ONLY accept events from the host!
-                    if (room.hostControlOnly && ws.id !== room.host) {
-                        return; // Ignore event
-                    }
-
-                    broadcastToRoom(data.roomId, {
-                        type: 'SYNC_STATE',
-                        event: data.event,
-                        time: data.time,
-                        playbackRate: data.playbackRate,
-                        byUsername: ws.username
-                    }, ws);
+                    if (room.hostControlOnly && ws.id !== room.host) return;
+                    broadcastToRoom(data.roomId, { type: 'SYNC_STATE', event: data.event, time: data.time, playbackRate: data.playbackRate, byUsername: ws.username }, ws);
                 }
             }
             else if (data.type === 'CHAT_MESSAGE') {
-                if (rooms.has(data.roomId)) {
-                    broadcastToRoom(data.roomId, {
-                        type: 'CHAT_MESSAGE',
-                        username: ws.username,
-                        color: ws.color,
-                        text: data.text
-                    }, null);
-                }
+                broadcastToRoom(data.roomId, { type: 'CHAT_MESSAGE', username: ws.username, color: ws.color, text: data.text }, null);
             }
             else if (data.type === 'REACTION') {
-                if (rooms.has(data.roomId)) {
-                    broadcastToRoom(data.roomId, {
-                        type: 'REACTION',
-                        username: ws.username,
-                        emoji: data.emoji
-                    }, null);
-                }
-            }
-            else if (data.type === 'TYPING') {
-                if (rooms.has(data.roomId)) {
-                    broadcastToRoom(data.roomId, {
-                        type: 'TYPING',
-                        username: ws.username,
-                        isTyping: data.isTyping
-                    }, ws);
-                }
-            }
-            else if (data.type === 'TOGGLE_HOST_CONTROL') {
-                if (rooms.has(data.roomId)) {
-                    const room = rooms.get(data.roomId);
-                    if (room.host === ws.id) {
-                        room.hostControlOnly = data.enabled;
-                        broadcastRoomUpdate(data.roomId);
-                        broadcastToRoom(data.roomId, {
-                            type: 'TOAST',
-                            message: `Host Control Mode is now ${data.enabled ? 'ON' : 'OFF'}`,
-                            color: '#ffb86c'
-                        }, null);
-                    }
-                }
+                broadcastToRoom(data.roomId, { type: 'REACTION', username: ws.username, emoji: data.emoji }, null);
             }
             else if (data.type === 'SIGNALING') {
                 if (rooms.has(data.roomId)) {
                     const room = rooms.get(data.roomId);
-                    const targetClient = Array.from(room.clients).find(c => c.id === data.targetId);
-                    if (targetClient) {
-                        targetClient.send(JSON.stringify({
-                            type: 'SIGNALING',
-                            fromId: ws.id,
-                            fromUsername: ws.username,
-                            payload: data.payload
-                        }));
+                    const target = Array.from(room.clients).find(c => c.id === data.targetId);
+                    if (target) {
+                        target.send(JSON.stringify({ type: 'SIGNALING', fromId: ws.id, fromUsername: ws.username, payload: data.payload }));
                     }
                 }
             }
@@ -147,87 +78,40 @@ wss.on('connection', (ws) => {
             }
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 if (rooms.has(data.roomId)) {
-                    const room = rooms.get(data.roomId);
-                    room.nowPlaying = data.title;
-                    broadcastToRoom(data.roomId, {
-                        type: 'NOW_PLAYING',
-                        title: data.title
-                    }, null);
+                    rooms.get(data.roomId).nowPlaying = data.title;
+                    broadcastToRoom(data.roomId, { type: 'NOW_PLAYING', title: data.title }, null);
                 }
             }
-        } catch (e) {
-            console.error('Error processing message:', e);
-        }
+        } catch (e) { console.error(e); }
     });
 
     ws.on('close', () => {
-        leaveRoom(ws);
+        if (ws.roomId && rooms.has(ws.roomId)) {
+            const room = rooms.get(ws.roomId);
+            room.clients.delete(ws);
+            if (room.clients.size === 0) rooms.delete(ws.roomId);
+            else {
+                if (room.host === ws.id) room.host = room.clients.values().next().value.id;
+                broadcastRoomUpdate(ws.roomId);
+            }
+        }
     });
 });
-
-function leaveRoom(ws) {
-    if (ws.roomId && rooms.has(ws.roomId)) {
-        const room = rooms.get(ws.roomId);
-        room.clients.delete(ws);
-        
-        broadcastToRoom(ws.roomId, {
-            type: 'TOAST',
-            message: `${ws.username} left the room.`,
-            color: '#ff5555'
-        }, ws);
-
-        if (room.clients.size === 0) {
-            rooms.delete(ws.roomId);
-        } else {
-            if (room.host === ws.id) {
-                const nextClient = room.clients.values().next().value;
-                if (nextClient) {
-                    room.host = nextClient.id;
-                    broadcastToRoom(ws.roomId, {
-                        type: 'TOAST',
-                        message: `${nextClient.username} is now the host!`,
-                        color: '#50fa7b'
-                    }, null);
-                }
-            }
-            broadcastRoomUpdate(ws.roomId);
-        }
-        
-        ws.roomId = null;
-    }
-}
 
 function broadcastRoomUpdate(roomId) {
     if (!rooms.has(roomId)) return;
     const room = rooms.get(roomId);
-    const usersInfo = Array.from(room.clients).map(c => ({
-        id: c.id,
-        username: c.username,
-        color: c.color,
-        isHost: c.id === room.host,
-        isInCall: c.isInCall || false
-    }));
-    
-    broadcastToRoom(roomId, {
-        type: 'ROOM_UPDATE',
-        roomId: roomId,
-        hostControlOnly: room.hostControlOnly,
-        users: usersInfo
-    }, null);
+    const users = Array.from(room.clients).map(c => ({ id: c.id, username: c.username, color: c.color, isHost: c.id === room.host, isInCall: c.isInCall || false }));
+    broadcastToRoom(roomId, { type: 'ROOM_UPDATE', roomId: roomId, hostControlOnly: room.hostControlOnly, users: users }, null);
 }
 
 function broadcastToRoom(roomId, messageObj, excludeWs = null) {
     if (!rooms.has(roomId)) return;
-    const room = rooms.get(roomId);
-    const messageStr = JSON.stringify(messageObj);
-    for (const client of room.clients) {
-        if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-            client.send(messageStr);
-        }
+    const msg = JSON.stringify(messageObj);
+    for (const client of rooms.get(roomId).clients) {
+        if (client !== excludeWs && client.readyState === WebSocket.OPEN) client.send(msg);
     }
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`SyncStream Signaling Server running on port ${PORT}`);
-});
+server.listen(PORT, '0.0.0.0', () => console.log(`Running on ${PORT}`));
