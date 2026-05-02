@@ -4,77 +4,71 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SyncStream Pro</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="popup.css">
 </head>
 <body>
+    <div id="star-container" class="cosmic-bg"></div>
+    
     <div class="glass-container">
         <header>
             <div class="logo">
                 <div class="play-icon"></div>
-                <h1>SyncStream</h1>
+                <h1>SyncStream <span style="color:var(--accent); font-size:10px;">PRO</span></h1>
             </div>
-            <div class="status-indicator offline" id="connection-status"></div>
+            <div class="status-indicator" id="connection-status"></div>
         </header>
 
         <main>
-            <div id="setup-view" class="view active">
-                <p class="subtitle">Watch videos in sync with friends.</p>
+            <!-- 🪐 Giriş Ekranı -->
+            <div id="join-view" class="view">
+                <div class="welcome-text">
+                    Watch videos together, <br> synced in real-time.
+                </div>
                 
                 <div class="input-group">
-                    <label for="username">Username</label>
-                    <input type="text" id="username" placeholder="Enter your name" autocomplete="off">
+                    <label>DISPLAY NAME</label>
+                    <input type="text" id="username-input" placeholder="How should we call you?" autocomplete="off">
                 </div>
-
+                
+                <div class="input-group">
+                    <label>ROOM CODE (OPTIONAL)</label>
+                    <input type="text" id="room-input" placeholder="Enter code to join" maxlength="6" autocomplete="off">
+                </div>
+                
                 <div class="action-buttons">
-                    <button id="create-room-btn" class="btn primary-btn">
-                        <span class="icon">✦</span> Create New Room
-                    </button>
-                    
-                    <div class="divider">
-                        <span>OR</span>
+                    <button id="main-action-btn" class="btn primary-btn">START WATCHING</button>
+                    <div id="create-hint" style="font-size:10px; color:var(--text-dim); text-align:center;">
+                        No code? We'll create a new room for you.
                     </div>
-
-                    <div class="input-group">
-                        <input type="text" id="room-code-input" placeholder="Enter Room Code" autocomplete="off">
-                    </div>
-                    <button id="join-room-btn" class="btn secondary-btn">
-                        Join Existing Room
-                    </button>
                 </div>
             </div>
 
-            <div id="room-view" class="view">
-                <div class="room-header">
-                    <span class="room-label">Current Room:</span>
-                    <div class="room-code-container">
-                        <h2 id="current-room-code">ABCD</h2>
-                        <button id="copy-code-btn" title="Copy room code">⎘</button>
+            <!-- 🛸 Aktif Oda Ekranı -->
+            <div id="room-view" class="view" style="display: none;">
+                <div class="room-card">
+                    <span class="room-label">SHARE THIS CODE</span>
+                    <div class="room-code" id="current-room-code">----</div>
+                    <div style="display:flex; gap:8px; width:100%;">
+                        <button id="copy-code-btn" class="share-btn" style="flex:1">Copy Code</button>
+                        <button id="copy-link-btn" class="share-btn" style="flex:1">Copy Link</button>
                     </div>
-                    <button id="copy-link-btn" style="width:100%; margin-top:8px; background:rgba(99,102,241,0.15); border:1px solid rgba(99,102,241,0.4); color:#a5b4fc; padding:7px; border-radius:7px; cursor:pointer; font-size:12px; font-family:inherit;">🔗 Share Link</button>
                 </div>
 
-                <div class="users-section">
-                    <h3>Participants (<span id="user-count">1</span>)</h3>
-                    <ul id="users-list" class="users-list">
-                        <!-- User list will be populated here -->
-                    </ul>
+                <div class="section-label">PEOPLE IN ROOM</div>
+                <div id="user-list" class="user-list"></div>
+
+                <div class="now-playing-box">
+                    <div class="section-label">NOW WATCHING</div>
+                    <div id="now-playing-title" class="np-title">Scanning...</div>
                 </div>
 
-                <div class="now-playing-box" style="background: var(--glass-bg); padding: 10px; border-radius: 8px; margin-bottom: 15px; font-size: 12px; border: 1px solid var(--glass-border);">
-                    <span style="color: var(--text-secondary);">Now Playing:</span><br>
-                    <strong id="now-playing-title" style="color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; margin-top: 4px;">Waiting for video...</strong>
+                <div class="host-control" id="host-controls" style="display: none;">
+                    <input type="checkbox" id="host-control-only">
+                    <label for="host-control-only">Only host can control video</label>
                 </div>
 
-                <div class="controls-section">
-                    <div id="host-controls" style="display: none; margin-bottom: 12px; background: rgba(99, 102, 241, 0.1); padding: 10px; border-radius: 8px; border: 1px solid rgba(99, 102, 241, 0.3);">
-                        <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer;">
-                            <input type="checkbox" id="host-control-checkbox" style="width: auto;">
-                            Only Host Can Control Video
-                        </label>
-                    </div>
-                    <button id="leave-room-btn" class="btn danger-btn">Leave Room</button>
-                </div>
+                <button id="leave-btn" class="btn danger-btn">Leave Room</button>
             </div>
         </main>
     </div>

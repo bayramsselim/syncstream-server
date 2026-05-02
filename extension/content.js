@@ -96,11 +96,12 @@ function applyRemoteSync(msg) {
     if (!videoElement) return;
     isSyncing = true;
     
-    // Remove sync overlay when first signal received
-    const overlay = document.getElementById('ss-sync-overlay');
-    if (overlay) {
-        overlay.style.opacity = '0';
-        setTimeout(() => overlay.remove(), 500);
+    // Update sync indicator
+    const indicator = document.getElementById('ss-sync-indicator');
+    if (indicator) {
+        indicator.style.display = 'block';
+        clearTimeout(window.ssSyncTimeout);
+        window.ssSyncTimeout = setTimeout(() => indicator.style.display = 'none', 2000);
     }
 
     const diff = Math.abs(videoElement.currentTime - msg.time);
@@ -164,9 +165,23 @@ async function updateMedia() {
             if (!localStream) {
                 const q = VIDEO_QUALITY[currentQuality];
                 localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-                    video: { width: q.width, height: q.height, frameRate: q.frameRate }
+                    audio: isMicOn ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
+                    video: isCamOn ? { width: q.width, height: q.height, frameRate: q.frameRate } : false
                 });
+            } else {
+                // If stream exists, we might need to add/remove tracks if one was totally missing
+                const hasVideo = localStream.getVideoTracks().length > 0;
+                const hasAudio = localStream.getAudioTracks().length > 0;
+                
+                if (isCamOn && !hasVideo) {
+                    const q = VIDEO_QUALITY[currentQuality];
+                    const tempStream = await navigator.mediaDevices.getUserMedia({ video: { width: q.width, height: q.height, frameRate: q.frameRate } });
+                    tempStream.getVideoTracks().forEach(t => localStream.addTrack(t));
+                }
+                if (isMicOn && !hasAudio) {
+                    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    tempStream.getAudioTracks().forEach(t => localStream.addTrack(t));
+                }
             }
             // Enable/disable tracks (no stop/restart = no renegotiation storm)
             localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
@@ -534,16 +549,12 @@ function injectUI() {
     });
     root.appendChild(emojiBar);
 
-    // Initial Sync Overlay
-    const syncOverlay = document.createElement('div');
-    syncOverlay.id = 'ss-sync-overlay';
-    syncOverlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.95);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2147483648;color:#fff;pointer-events:auto;transition:opacity 0.5s;';
-    syncOverlay.innerHTML = `
-        <div style="width:40px;height:40px;border:3px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:ss-star-float 1s linear infinite;"></div>
-        <div style="margin-top:20px;font-weight:600;letter-spacing:0.1em;font-size:14px;">SYNCING WITH NEBULA</div>
-        <div style="margin-top:8px;font-size:11px;color:#666;">Waiting for master signal...</div>
-    `;
-    root.appendChild(syncOverlay);
+    // Initial Sync Indicator (Subtle)
+    const syncIndicator = document.createElement('div');
+    syncIndicator.id = 'ss-sync-indicator';
+    syncIndicator.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.9);color:#fff;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:600;z-index:2147483648;pointer-events:none;transition:opacity 0.5s;display:none;box-shadow:0 0 15px rgba(99,102,241,0.4);letter-spacing:0.05em;';
+    syncIndicator.textContent = 'SYNCING VIDEO...';
+    root.appendChild(syncIndicator);
 
     updateButtons();
 }
@@ -682,7 +693,9 @@ setInterval(() => {
         });
     }
 }, 1000);
-}, 1000);
+
+console.log('%c[SyncStream] UI Master: ' + canShowUI, 'color: #6366f1; font-weight: bold; font-size: 12px;');
+
 
 // ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
 document.addEventListener('keydown', (e) => {
