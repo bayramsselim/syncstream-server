@@ -18,7 +18,13 @@
     if (window.__ssFS) return;
     window.__ssFS = true;
 
-    var isActive = function () { return document.documentElement.hasAttribute('data-ss-active'); };
+    /* Track active state independently of content.js (which runs at document_idle
+       and might miss the moment of intercept). Top frame broadcasts SS_ACTIVE to
+       all iframes whenever ss-root exists; iframes also fall back to data-ss-active. */
+    var msgActive = false;
+    var isActive = function () {
+        return msgActive || document.documentElement.hasAttribute('data-ss-active');
+    };
 
     /* ── TOP FRAME ─────────────────────────────────────────────────────── */
     if (window === window.top) {
@@ -148,6 +154,25 @@
             if (e.key === 'Escape' && fakeEl) exitFake();
         });
 
+        /* Broadcast SS_ACTIVE state to all iframes, so their intercepts can fire
+           even if content.js (isolated world, document_idle) hasn't run yet or
+           failed to set data-ss-active. Repeats so late-loaded iframes catch up. */
+        function broadcastActive() {
+            var on = isActive();
+            var msg = { type: on ? 'SS_ACTIVE' : 'SS_INACTIVE' };
+            document.querySelectorAll('iframe').forEach(function (fr) {
+                try { fr.contentWindow.postMessage(msg, '*'); } catch (_) {}
+            });
+        }
+        setInterval(broadcastActive, 1500);
+        new MutationObserver(broadcastActive).observe(document.documentElement, {
+            attributes: true, attributeFilter: ['data-ss-active']
+        });
+        /* Also catch new iframes appearing in the DOM */
+        new MutationObserver(broadcastActive).observe(document.body || document.documentElement, {
+            childList: true, subtree: true
+        });
+
         return;
     }
 
@@ -163,6 +188,16 @@
 
     window.addEventListener('message', function (e) {
         if (!e.data) return;
+        if (e.data.type === 'SS_ACTIVE') {
+            msgActive = true;
+            broadcastDown(e.data);  /* propagate to nested iframes */
+            return;
+        }
+        if (e.data.type === 'SS_INACTIVE') {
+            msgActive = false;
+            broadcastDown(e.data);
+            return;
+        }
         if (e.data.type === 'SS_FS_ON') {
             broadcastDown(e.data);  /* L5: forward to nested iframes */
             if (!fsOn) {
