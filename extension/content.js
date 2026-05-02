@@ -29,16 +29,39 @@ let awayTimer       = null;
 const IS_TOP_FRAME = (window === window.top);
 const ICE_SERVERS  = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun.l.google.com:19302'  },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        { urls: 'turn:openrelay.metered.ca:80',              username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443',             username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
     ]
 };
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-    if (res) { roomState = res; if (IS_TOP_FRAME && roomState.myId) initPeers(); }
+    if (res?.myId) {
+        roomState = res;
+        if (IS_TOP_FRAME) {
+            initPeers();
+            // Restore mic/cam state after cross-page navigation
+            chrome.storage.session.get(['ssMicOn', 'ssCamOn'], (stored) => {
+                if (stored.ssMicOn || stored.ssCamOn) {
+                    isMicOn = stored.ssMicOn || false;
+                    isCamOn = stored.ssCamOn || false;
+                    updateMedia();
+                }
+            });
+        }
+    } else if (IS_TOP_FRAME) {
+        // Auto-join if invite code is in URL
+        try {
+            const code = new URL(window.location.href).searchParams.get('ss_room');
+            if (code) setTimeout(() => showJoinPrompt(code.toUpperCase()), 1500);
+        } catch (_) {}
+    }
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
@@ -51,6 +74,14 @@ chrome.runtime.onMessage.addListener((msg) => {
         if (roomState.myId) initPeers();
         updateParticipantPanel();
         syncAvatarTiles(roomState.users || []);
+        // Close & remove peer connections for users who left
+        const activeIds = new Set((roomState.users || []).map(u => u.id));
+        Object.keys(peerConnections).forEach(peerId => {
+            if (!activeIds.has(peerId)) {
+                peerConnections[peerId]?.pc?.close();
+                delete peerConnections[peerId];
+            }
+        });
         const _rt = document.getElementById('ss-reconnect-toast'); if (_rt) _rt.remove();
         // Host change notification
         const newHost = (roomState.users || []).find(u => u.isHost);
@@ -199,6 +230,7 @@ async function updateMedia() {
             }
         }
     } catch (e) { console.error('[SS] Media:', e); isMicOn = false; isCamOn = false; }
+    chrome.storage.session.set({ ssMicOn: isMicOn, ssCamOn: isCamOn }).catch(() => {});
     updateButtons();
 }
 
@@ -556,6 +588,63 @@ function showReconnectToast(sec) {
     const update = () => { t.textContent = `⚡ Bağlantı kesildi — ${s}s sonra yeniden bağlanıyor...`; };
     update();
     t._timer = setInterval(() => { s--; if (s <= 0) { clearInterval(t._timer); t.remove(); } else update(); }, 1000);
+}
+
+// ─── AUTO JOIN PROMPT ─────────────────────────────────────────────────────────
+function showJoinPrompt(code) {
+    if (document.getElementById('ss-join-prompt') || roomState?.roomId) return;
+
+    const box = document.createElement('div');
+    box.id = 'ss-join-prompt';
+    box.style.cssText = 'position:fixed;top:20px;right:20px;background:rgba(6,6,14,0.97);border:1px solid rgba(99,102,241,0.3);border-radius:16px;padding:20px;width:280px;z-index:2147483646;box-shadow:0 12px 40px rgba(0,0,0,0.7);pointer-events:auto;font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif;display:flex;flex-direction:column;gap:12px;';
+
+    const ttl = document.createElement('div');
+    ttl.style.cssText = 'font-size:13px;font-weight:700;color:#fff;';
+    ttl.textContent = '🎬 Odaya davet edildiniz';
+
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:11px;color:#555;margin-top:-6px;';
+    sub.textContent = `Oda kodu: ${code}`;
+
+    const inp = document.createElement('input');
+    inp.placeholder = 'Adın...'; inp.maxLength = 24; inp.autocomplete = 'off';
+    inp.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#fff;padding:10px 12px;border-radius:10px;font-size:13px;outline:none;width:100%;box-sizing:border-box;transition:border-color 0.2s;';
+    inp.onfocus = () => { inp.style.borderColor = '#6366f1'; };
+    inp.onblur  = () => { inp.style.borderColor = 'rgba(255,255,255,0.1)'; };
+
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;';
+
+    const noBtn = document.createElement('button');
+    noBtn.textContent = 'Hayır';
+    noBtn.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:none;color:#aaa;padding:10px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600;transition:background 0.15s;';
+    noBtn.onmouseenter = () => { noBtn.style.background = 'rgba(255,255,255,0.13)'; };
+    noBtn.onmouseleave = () => { noBtn.style.background = 'rgba(255,255,255,0.07)'; };
+    noBtn.onclick = () => box.remove();
+
+    const joinBtn = document.createElement('button');
+    joinBtn.textContent = 'Katıl →';
+    joinBtn.style.cssText = 'flex:2;background:#6366f1;border:none;color:#fff;padding:10px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:700;transition:background 0.15s;';
+    joinBtn.onmouseenter = () => { joinBtn.style.background = '#4f46e5'; };
+    joinBtn.onmouseleave = () => { joinBtn.style.background = '#6366f1'; };
+    joinBtn.onclick = () => {
+        const name = inp.value.trim();
+        if (!name) { inp.focus(); return; }
+        chrome.storage.local.set({ savedUsername: name });
+        chrome.runtime.sendMessage({ type: 'JOIN_ROOM', roomId: code, username: name });
+        box.remove();
+    };
+    inp.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') joinBtn.click(); });
+    inp.addEventListener('keydown',  e => e.stopPropagation());
+
+    row.appendChild(noBtn); row.appendChild(joinBtn);
+    box.appendChild(ttl); box.appendChild(sub); box.appendChild(inp); box.appendChild(row);
+    document.body.appendChild(box);
+
+    chrome.storage.local.get(['savedUsername'], (res) => {
+        if (res.savedUsername) inp.value = res.savedUsername;
+        setTimeout(() => inp.focus(), 50);
+    });
 }
 
 // ─── NAVIGATE TOAST ───────────────────────────────────────────────────────────
