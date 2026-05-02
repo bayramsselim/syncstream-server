@@ -126,15 +126,22 @@ function applyRemoteSync(msg) {
     if (!videoElement) return;
     isSyncing = true;
 
-    // Show sync indicator with who triggered it
     showSyncIndicator(msg.byUsername, msg.event);
 
     const diff = Math.abs(videoElement.currentTime - msg.time);
-    if (msg.event === 'seek' || diff > 1.2) videoElement.currentTime = msg.time;
+
+    if (msg.event === 'pause') {
+        videoElement.currentTime = msg.time; // exact timestamp — no drift on pause
+        if (!videoElement.paused) videoElement.pause();
+    } else if (msg.event === 'play') {
+        if (diff > 0.3) videoElement.currentTime = msg.time;
+        if (videoElement.paused) videoElement.play().catch(() => {});
+    } else if (msg.event === 'seek' || diff > 0.3) {
+        videoElement.currentTime = msg.time;
+    }
+
     if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
-    if (msg.event === 'play'  && videoElement.paused)  videoElement.play().catch(() => {});
-    if (msg.event === 'pause' && !videoElement.paused) videoElement.pause();
-    setTimeout(() => { isSyncing = false; }, 500);
+    setTimeout(() => { isSyncing = false; }, 150); // 500→150ms: unlock faster
 }
 
 function showSyncIndicator(byUser, event) {
@@ -159,7 +166,7 @@ function initPeers() {
 
 async function createPeer(tid, name) {
     if (peerConnections[tid]) return peerConnections[tid];
-    const pc   = new RTCPeerConnection(ICE_SERVERS);
+    const pc   = new RTCPeerConnection({ ...ICE_SERVERS, bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
     const pObj = { pc, polite: roomState.myId < tid, makingOffer: false };
     peerConnections[tid] = pObj;
 
@@ -209,8 +216,8 @@ async function updateMedia() {
         if (isMicOn || isCamOn) {
             if (!localStream) {
                 localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: { echoCancellation: true, noiseSuppression: true },
-                    video: { width: 320, height: 240, frameRate: 15 }
+                    audio: { echoCancellation: true, noiseSuppression: true, latency: 0, channelCount: 1 },
+                    video: { width: 320, height: 240, frameRate: 24, facingMode: 'user' }
                 });
                 Object.values(peerConnections).forEach(({ pc }) => {
                     localStream.getTracks().forEach(track => {
@@ -368,6 +375,7 @@ function createTileShell(id, name, color) {
     // Video element — hidden until stream arrives
     const v = document.createElement('video');
     v.id = `ss-v-${id}`; v.autoplay = true; v.playsInline = true; v.muted = (id === 'local');
+    v.disableRemotePlayback = true; // reduces buffering overhead on remote streams
     v.style.cssText = 'width:100%;height:100%;object-fit:cover;display:none;';
     tile.appendChild(v);
 
