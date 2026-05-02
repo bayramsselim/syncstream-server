@@ -1,31 +1,22 @@
 /**
  * SyncStream Pro - Content Script
- * Version 5.0 - Root Cause Fix Edition
- *
- * KEY FIXES:
- * 1. Guard: createPeer only runs AFTER myId is confirmed from server
- * 2. Perfect Negotiation: polite/impolite collision prevention working correctly
- * 3. Sync and WebRTC are 100% isolated - no shared state
- * 4. Button clicks never bubble to YouTube player
- * 5. Remote video plays independently from YouTube player state
+ * Fixed: IS_TOP_FRAME guards, PLAYER_EVENT sync type, WebRTC media toggle,
+ *        XSS in chat, chat keyboard events, addVideoTile null guard, TURN servers
  */
 
-// ─── STATE ────────────────────────────────────────────────────────────────────
 let videoElement = null;
 let isSyncing    = false;
 let roomState    = null;
+let localStream  = null;
+let peerConnections = {};
+let signalingQueue = [];
+let processingSignaling = false;
 
-let localStream      = null;
-let peerConnections  = {};  // peerId → { pc, polite, makingOffer }
-let hiddenVideos     = new Set();
+let isMicOn    = false;
+let isCamOn    = false;
+let isChatOpen = false;
 
-let isMicOn      = false;
-let isCamOn      = false;
-let isChatOpen   = false;
-let isEmojiOpen  = false;
-let isMirror     = true;   // mirror local camera by default
-let isSoundOn    = true;   // UI notification sounds
-
+const IS_TOP_FRAME = (window === window.top);
 const ICE_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -35,338 +26,190 @@ const ICE_SERVERS = {
     ]
 };
 
-// ─── FRAME GUARD ────────────────────────────────────────────────────────────────
-// UI + WebRTC: only in the top (main) frame
-// Video Sync: in ALL frames (iframe players like dizigom)
-const IS_TOP_FRAME = (window === window.top);
-
-// ─── UI PERMISSION GUARD ────────────────────────────────────────────────────────
-let canShowUI = false; // Only one frame per tab can show the UI
-console.log(`[SyncStream] v5.2 loading... ${location.hostname}`);
-
-// ─── INIT ──────────────────────────────────────────────────────────────────────
-chrome.runtime.sendMessage({ type: 'GET_UI_PERMISSION' }, (perm) => {
-    canShowUI = perm?.canShow || false;
-    console.log(`[SyncStream] UI Permission: ${canShowUI}`);
-
-    if (canShowUI) {
-        chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-            if (chrome.runtime.lastError || !res) return;
-            roomState = res;
-            if (roomState.myId) initPeers();
-            if (roomState.isHost && videoElement) broadcastState();
-        });
-    } else {
-        // In iframe: still need roomState for sync guard
-        chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-            if (!chrome.runtime.lastError && res) roomState = res;
-        });
+// ─── INITIALIZATION ───────────────────────────────────────────────────────────
+chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+    if (res) {
+        roomState = res;
+        if (IS_TOP_FRAME && roomState.myId) initPeers();
     }
 });
 
-// ─── VIDEO SYNC ────────────────────────────────────────────────────────────────
+chrome.runtime.onMessage.addListener((msg) => {
+    // Video sync runs in ALL frames (catches iframe players like dizigom)
+    if (msg.type === 'SYNC_STATE') {
+        applyRemoteSync(msg);
+        return;
+    }
+
+    // Everything else: top frame only
+    if (!IS_TOP_FRAME) return;
+
+    if (msg.type === 'ROOM_STATE') {
+        roomState = msg.data;
+        if (roomState.myId) initPeers();
+        updateParticipantPanel();
+    }
+    else if (msg.type === 'SIGNALING')    enqueueSignaling(msg.fromId, msg.payload);
+    else if (msg.type === 'CHAT_MESSAGE') addChatMessage(msg.username, msg.text, msg.color);
+    else if (msg.type === 'REACTION')     animateEmoji(msg.emoji);
+    else if (msg.type === 'TOAST')        showToast(msg.message, msg.color);
+});
+
+// ─── SYNC ─────────────────────────────────────────────────────────────────────
 function findMainVideo() {
-    // Exclude our own conference videos
-    const all = Array.from(document.querySelectorAll('video')).filter(v => !v.id.startsWith('ss-v-'));
-    if (!all.length) return null;
-    return all.sort((a, b) => (b.offsetWidth * b.offsetHeight) - (a.offsetWidth * a.offsetHeight))[0];
-}
-
-function attachSyncListeners() {
-    if (!videoElement) return;
-    videoElement.addEventListener('play',   () => { if (!isSyncing && roomState && !blockedByHostControl()) broadcastState('play');  });
-    videoElement.addEventListener('pause',  () => { if (!isSyncing && roomState && !blockedByHostControl()) broadcastState('pause'); });
-    videoElement.addEventListener('seeked', () => { if (!isSyncing && roomState && !blockedByHostControl()) broadcastState('seek');  });
-}
-
-function blockedByHostControl() {
-    return roomState.hostControlOnly && !roomState.isHost;
+    return Array.from(document.querySelectorAll('video'))
+        .filter(v => v.offsetWidth > 100 && !v.id.startsWith('ss-v-'))
+        .sort((a, b) => b.offsetWidth - a.offsetWidth)[0];
 }
 
 function broadcastState(event = 'sync') {
-    if (!videoElement) return;
+    if (!videoElement || isSyncing || !roomState) return;
+    // Must be PLAYER_EVENT — background.js forwards this to the server
     chrome.runtime.sendMessage({
-        type:  'PLAYER_EVENT',
-        event: event,
-        time:  videoElement.currentTime
+        type: 'PLAYER_EVENT',
+        event,
+        time: videoElement.currentTime,
+        playbackRate: videoElement.playbackRate
     }).catch(() => {});
 }
 
 function applyRemoteSync(msg) {
+    if (!videoElement) videoElement = findMainVideo();
     if (!videoElement) return;
     isSyncing = true;
-    
-    // Update sync indicator
-    const indicator = document.getElementById('ss-sync-indicator');
-    if (indicator) {
-        indicator.style.display = 'block';
-        clearTimeout(window.ssSyncTimeout);
-        window.ssSyncTimeout = setTimeout(() => indicator.style.display = 'none', 2000);
-    }
-
     const diff = Math.abs(videoElement.currentTime - msg.time);
-    if (msg.event === 'seek' || diff > 2) videoElement.currentTime = msg.time;
-    if (msg.event === 'play')  videoElement.play().catch(() => {});
-    if (msg.event === 'pause') videoElement.pause();
-    setTimeout(() => { isSyncing = false; }, 1000);
+    if (msg.event === 'seek' || diff > 1.2) videoElement.currentTime = msg.time;
+    if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
+    if (msg.event === 'play'  && videoElement.paused)  videoElement.play().catch(() => {});
+    if (msg.event === 'pause' && !videoElement.paused) videoElement.pause();
+    setTimeout(() => { isSyncing = false; }, 500);
 }
 
-// ─── ADAPTIVE BITRATE ──────────────────────────────────────────────────────────
-// Quality levels: high (good connection) → low (poor connection)
-const VIDEO_QUALITY = {
-    high:   { width: 320, height: 240, frameRate: 15, bitrate: 350000 },
-    medium: { width: 240, height: 180, frameRate: 10, bitrate: 150000 },
-    low:    { width: 160, height: 120, frameRate: 7,  bitrate:  60000 }
-};
-let currentQuality = 'high';
-
-async function setEncodingParams(pc, bitrate) {
-    const senders = pc.getSenders().filter(s => s.track?.kind === 'video');
-    for (const sender of senders) {
-        try {
-            const params = sender.getParameters();
-            if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
-            params.encodings[0].maxBitrate = bitrate;
-            await sender.setParameters(params);
-        } catch(e) {}
-    }
-}
-
-async function applyQuality(level) {
-    if (currentQuality === level) return;
-    currentQuality = level;
-    const q = VIDEO_QUALITY[level];
-    console.log(`[SyncStream] Network quality → ${level}`);
-    // ONLY touch video bitrate - never audio (audio dropout fix)
-    Object.values(peerConnections).forEach(({ pc }) => setEncodingParams(pc, q.bitrate));
-}
-
-// Monitor each peer connection's stats and adapt quality (video only)
-async function monitorConnectionQuality(tid, pc) {
-    try {
-        const stats = await pc.getStats();
-        let rtt = 0;
-        stats.forEach(report => {
-            if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime) {
-                rtt = report.currentRoundTripTime;
-            }
-        });
-        // Only adjust bitrate based on RTT - do NOT call applyConstraints (causes audio glitches)
-        if (rtt > 0.4)      applyQuality('low');
-        else if (rtt > 0.2) applyQuality('medium');
-        else                applyQuality('high');
-    } catch(e) {}
-}
-
-// ─── WEBRTC MEDIA ─────────────────────────────────────────────────────────────
-async function updateMedia() {
-    try {
-        if (isMicOn || isCamOn) {
-            if (!localStream) {
-                const q = VIDEO_QUALITY[currentQuality];
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: isMicOn ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true } : false,
-                    video: isCamOn ? { width: q.width, height: q.height, frameRate: q.frameRate } : false
-                });
-            } else {
-                // If stream exists, we might need to add/remove tracks if one was totally missing
-                const hasVideo = localStream.getVideoTracks().length > 0;
-                const hasAudio = localStream.getAudioTracks().length > 0;
-                
-                if (isCamOn && !hasVideo) {
-                    const q = VIDEO_QUALITY[currentQuality];
-                    const tempStream = await navigator.mediaDevices.getUserMedia({ video: { width: q.width, height: q.height, frameRate: q.frameRate } });
-                    tempStream.getVideoTracks().forEach(t => localStream.addTrack(t));
-                }
-                if (isMicOn && !hasAudio) {
-                    const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    tempStream.getAudioTracks().forEach(t => localStream.addTrack(t));
-                }
-            }
-            // Enable/disable tracks (no stop/restart = no renegotiation storm)
-            localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
-            localStream.getVideoTracks().forEach(t => t.enabled = isCamOn);
-
-            // Push tracks to existing peers
-            Object.values(peerConnections).forEach(({ pc }) => {
-                localStream.getTracks().forEach(track => {
-                    const existing = pc.getSenders().find(s => s.track?.kind === track.kind);
-                    if (!existing) {
-                        const sender = pc.addTrack(track, localStream);
-                        // Set initial bitrate limit
-                        if (track.kind === 'video') {
-                            setTimeout(() => setEncodingParams(pc, VIDEO_QUALITY[currentQuality].bitrate), 1000);
-                        }
-                    } else if (existing.track !== track) {
-                        existing.replaceTrack(track);
-                    }
-                });
-            });
-
-            if (isCamOn) addVideoTile('local', localStream, 'You');
-            else removeVideoTile('local');
-
-            chrome.runtime.sendMessage({ type: 'TOGGLE_CALL', enabled: true });
-        } else {
-            // Both off: stop stream
-            if (localStream) {
-                localStream.getTracks().forEach(t => t.stop());
-                localStream = null;
-                Object.values(peerConnections).forEach(({ pc }) => pc.getSenders().forEach(s => pc.removeTrack(s)));
-                removeVideoTile('local');
-                chrome.runtime.sendMessage({ type: 'TOGGLE_CALL', enabled: false });
-            }
-        }
-    } catch (err) {
-        console.error('[SyncStream] Media error:', err);
-        isMicOn = false; isCamOn = false;
-    }
-    updateButtons();
-}
-
+// ─── WEBRTC ───────────────────────────────────────────────────────────────────
 function initPeers() {
     if (!roomState?.users || !roomState.myId) return;
     roomState.users.forEach(u => {
-        if (u.username !== roomState.myUsername) createPeer(u.id, u.username);
+        if (u.id !== roomState.myId && !peerConnections[u.id]) createPeer(u.id, u.username);
     });
 }
 
 async function createPeer(tid, name) {
-    if (peerConnections[tid]) return;
+    if (peerConnections[tid]) return peerConnections[tid];
 
-    // Guard: we MUST have myId to determine polite/impolite
-    if (!roomState?.myId) {
-        console.warn('[SyncStream] createPeer called before myId set, skipping', tid);
-        return;
-    }
-
-    const pc     = new RTCPeerConnection(ICE_SERVERS);
-    const polite = roomState.myId < tid;   // smaller ID = polite peer
-    const pObj   = { pc, polite, makingOffer: false };
+    console.log('[SyncStream] Creating peer:', name);
+    const pc   = new RTCPeerConnection(ICE_SERVERS);
+    const pObj = { pc, polite: roomState.myId < tid, makingOffer: false };
     peerConnections[tid] = pObj;
 
-    console.log(`[SyncStream] Creating peer ${tid}, I am ${polite ? 'POLITE' : 'IMPOLITE'}`);
-
-    // ICE candidates
     pc.onicecandidate = ({ candidate }) => {
         if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { candidate } });
     };
 
-    // Remote track received → show video tile immediately
-    pc.ontrack = ({ streams: [stream] }) => {
-        console.log('[SyncStream] Remote track received from', name);
-        addVideoTile(tid, stream, name);
-        // Force play immediately regardless of YouTube player state
-        const v = document.getElementById(`ss-v-${tid}`);
-        if (v) { v.muted = false; v.volume = 1.0; v.play().catch(() => {}); }
+    pc.ontrack = (event) => {
+        console.log('[SyncStream] Remote track received from:', name);
+        const stream = event.streams[0];
+        if (stream) addVideoTile(tid, stream, name);
     };
 
-    // Perfect Negotiation: automatic renegotiation
     pc.onnegotiationneeded = async () => {
         try {
             pObj.makingOffer = true;
             await pc.setLocalDescription();
             chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { description: pc.localDescription } });
-        } catch (e) {
-            console.error('[SyncStream] Negotiation error:', e);
-        } finally {
-            pObj.makingOffer = false;
-            // CRITICAL FIX: After renegotiation, force all remote streams back on
-            // This handles the case where pausing YouTube + opening camera kills audio
-            setTimeout(() => {
-                document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
-                    if (v.id !== 'ss-v-local' && v.srcObject) {
-                        v.muted = false;
-                        v.volume = 1.0;
-                        if (v.paused) v.play().catch(() => {});
-                    }
-                });
-            }, 500);
-        }
+        } catch (e) { console.error('[SyncStream] Negotiation error:', e); }
+        finally { pObj.makingOffer = false; }
     };
 
     pc.oniceconnectionstatechange = () => {
-        const state = pc.iceConnectionState;
-        console.log(`[SyncStream] ICE state ${tid}:`, state);
-        if (state === 'failed' || state === 'disconnected') {
-            console.log('[SyncStream] Connection degraded, restarting ICE...');
-            pc.restartIce();
-            // Force resume remote audio after reconnect
-            setTimeout(() => {
-                document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
-                    if (v.id !== 'ss-v-local' && v.srcObject) {
-                        v.muted = false; v.volume = 1.0;
-                        if (v.paused) v.play().catch(() => {});
-                    }
-                });
-            }, 1500);
-        }
+        if (pc.iceConnectionState === 'failed') pc.restartIce();
     };
 
-    // Monitor connection quality every 5 seconds
-    const qualityInterval = setInterval(() => {
-        if (!peerConnections[tid]) { clearInterval(qualityInterval); return; }
-        monitorConnectionQuality(tid, pc);
-    }, 5000);
-
-    // Add local tracks if camera/mic already on
     if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    return pObj;
 }
 
-async function handleSignaling(fromId, payload) {
-    // If we don't have a peer for this sender yet, create one (they initiated)
-    if (!peerConnections[fromId]) {
-        const fromUser = roomState?.users?.find(u => u.id === fromId);
-        if (fromUser) createPeer(fromId, fromUser.username);
-        else {
-            // We don't know who this is yet, create peer with unknown name
-            if (!roomState?.myId) return;
-            const pc2 = new RTCPeerConnection(ICE_SERVERS);
-            const polite2 = roomState.myId < fromId;
-            peerConnections[fromId] = { pc: pc2, polite: polite2, makingOffer: false };
-            pc2.onicecandidate = ({ candidate }) => { if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: fromId, payload: { candidate } }); };
-            pc2.ontrack = ({ streams: [s] }) => addVideoTile(fromId, s, 'User');
-            pc2.onnegotiationneeded = async () => {
-                try { peerConnections[fromId].makingOffer = true; await pc2.setLocalDescription(); chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: fromId, payload: { description: pc2.localDescription } }); }
-                catch(e) {} finally { peerConnections[fromId].makingOffer = false; }
-            };
-            if (localStream) localStream.getTracks().forEach(t => pc2.addTrack(t, localStream));
-        }
-    }
+function enqueueSignaling(fromId, payload) {
+    signalingQueue.push({ fromId, payload });
+    processQueue();
+}
 
-    const p  = peerConnections[fromId];
-    if (!p) return;
-    const pc = p.pc;
+async function processQueue() {
+    if (processingSignaling || signalingQueue.length === 0) return;
+    processingSignaling = true;
+    const { fromId, payload } = signalingQueue.shift();
 
     try {
-        if (payload.description) {
-            const isOffer    = payload.description.type === 'offer';
-            const notStable  = pc.signalingState !== 'stable';
-            const collision  = isOffer && (p.makingOffer || notStable);
+        let p = peerConnections[fromId];
+        if (!p) {
+            const u = roomState?.users?.find(x => x.id === fromId);
+            p = await createPeer(fromId, u ? u.username : 'User');
+        }
 
-            // Impolite peer: ignore colliding offers
-            if (!p.polite && collision) {
-                console.log('[SyncStream] Ignoring colliding offer (impolite)');
+        if (payload.description) {
+            const offerCollision = (payload.description.type === 'offer') &&
+                                   (p.makingOffer || p.pc.signalingState !== 'stable');
+            if (offerCollision && !p.polite) {
+                processingSignaling = false;
+                processQueue();
                 return;
             }
-
-            await pc.setRemoteDescription(payload.description);
-
-            if (isOffer) {
-                await pc.setLocalDescription();
-                chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: fromId, payload: { description: pc.localDescription } });
+            await p.pc.setRemoteDescription(payload.description);
+            if (payload.description.type === 'offer') {
+                await p.pc.setLocalDescription();
+                chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: fromId, payload: { description: p.pc.localDescription } });
             }
         } else if (payload.candidate) {
-            await pc.addIceCandidate(payload.candidate).catch(() => {});
+            await p.pc.addIceCandidate(payload.candidate).catch(() => {});
         }
-    } catch (err) {
-        console.error('[SyncStream] Signaling error:', err);
-    }
+    } catch (e) { console.error('[SyncStream] Signaling error:', e); }
+
+    processingSignaling = false;
+    processQueue();
 }
 
-// ─── VIDEO TILES ───────────────────────────────────────────────────────────────
-function addVideoTile(id, stream, label) {
-    if (hiddenVideos.has(id)) return;
+async function updateMedia() {
+    try {
+        if (isMicOn || isCamOn) {
+            if (!localStream) {
+                // Acquire stream once; use track.enabled to toggle without renegotiation
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    audio: { echoCancellation: true, noiseSuppression: true },
+                    video: { width: 320, height: 240, frameRate: 15 }
+                });
+                Object.values(peerConnections).forEach(({ pc }) => {
+                    localStream.getTracks().forEach(track => {
+                        const existing = pc.getSenders().find(s => s.track?.kind === track.kind);
+                        if (existing) existing.replaceTrack(track);
+                        else pc.addTrack(track, localStream);
+                    });
+                });
+            }
+            // Enable/disable tracks — no renegotiation on every toggle
+            localStream.getAudioTracks().forEach(t => t.enabled = isMicOn);
+            localStream.getVideoTracks().forEach(t => t.enabled = isCamOn);
+
+            if (isCamOn) addVideoTile('local', localStream, 'You');
+            else removeVideoTile('local');
+        } else {
+            if (localStream) {
+                localStream.getTracks().forEach(t => t.stop());
+                localStream = null;
+                Object.values(peerConnections).forEach(({ pc }) => {
+                    pc.getSenders().forEach(s => { try { pc.removeTrack(s); } catch (_) {} });
+                });
+            }
+            removeVideoTile('local');
+        }
+    } catch (e) {
+        console.error('[SyncStream] Media error:', e);
+        isMicOn = false; isCamOn = false;
+    }
+    updateButtons();
+}
+
+// ─── VIDEO TILES ──────────────────────────────────────────────────────────────
+function addVideoTile(id, stream, name) {
     const grid = document.getElementById('ss-grid');
     if (!grid) return;
 
@@ -374,36 +217,34 @@ function addVideoTile(id, stream, label) {
     if (!tile) {
         tile = document.createElement('div');
         tile.id = `ss-vid-${id}`;
-        tile.style.cssText = 'width:200px;height:150px;background:#111;border-radius:10px;overflow:hidden;position:relative;border:1px solid rgba(255,255,255,0.15);pointer-events:auto;';
+        tile.style.cssText = 'width:160px;height:120px;background:#000;border-radius:10px;overflow:hidden;border:1px solid rgba(255,255,255,0.2);pointer-events:auto;position:relative;';
 
-        const vid = document.createElement('video');
-        vid.id = `ss-v-${id}`;
-        vid.autoplay = true; vid.playsInline = true;
-        vid.style.cssText = 'width:100%;height:100%;object-fit:cover;pointer-events:none;';
-        tile.appendChild(vid);
+        const v = document.createElement('video');
+        v.id = `ss-v-${id}`;
+        v.autoplay = true;
+        v.playsInline = true;
+        v.muted = (id === 'local');
+        v.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+        tile.appendChild(v);
 
         const lbl = document.createElement('div');
-        lbl.style.cssText = 'position:absolute;bottom:5px;left:5px;background:rgba(0,0,0,0.7);color:#fff;font-size:10px;padding:2px 6px;border-radius:3px;pointer-events:none;';
-        lbl.textContent = label;
+        lbl.textContent = name;
+        lbl.style.cssText = 'position:absolute;bottom:5px;left:5px;font-size:10px;color:#fff;background:rgba(0,0,0,0.5);padding:2px 5px;border-radius:3px;pointer-events:none;';
         tile.appendChild(lbl);
-
-        const x = document.createElement('button');
-        x.innerHTML = '✕';
-        x.style.cssText = 'position:absolute;top:5px;right:5px;background:rgba(0,0,0,0.5);border:none;color:#fff;border-radius:50%;width:20px;height:20px;cursor:pointer;line-height:1;';
-        x.onclick = (e) => { e.stopPropagation(); hiddenVideos.add(id); tile.remove(); };
-        tile.appendChild(x);
 
         grid.appendChild(tile);
     }
 
-    const v = document.getElementById(`ss-v-${id}`);
-    if (v && v.srcObject !== stream) {
-        v.srcObject = stream;
-        v.muted = (id === 'local');
-        v.volume = 1.0;
-        // Mirror local camera (selfie view)
-        if (id === 'local') v.style.transform = 'scaleX(-1)';
-        v.play().catch(() => {});
+    const vEl = document.getElementById(`ss-v-${id}`);
+    if (vEl && vEl.srcObject !== stream) {
+        vEl.srcObject = stream;
+        // Retry with muted fallback to bypass autoplay policy
+        vEl.play().catch(() => {
+            vEl.muted = true;
+            vEl.play().then(() => {
+                if (id !== 'local') vEl.muted = false;
+            }).catch(() => {});
+        });
     }
 }
 
@@ -412,354 +253,175 @@ function removeVideoTile(id) {
     if (el) el.remove();
 }
 
-// ─── UI ────────────────────────────────────────────────────────────────────────
+// ─── CHAT & UI HELPERS ────────────────────────────────────────────────────────
+function addChatMessage(user, text, color) {
+    const msgs = document.getElementById('ss-msgs');
+    if (!msgs) return;
+    const m = document.createElement('div');
+    m.style.cssText = 'font-size:12px;word-wrap:break-word;';
+    const b = document.createElement('b');
+    b.style.color = color || '#6366f1';
+    b.textContent = user + ':';
+    const s = document.createElement('span');
+    s.style.color = '#fff';
+    s.textContent = ' ' + text;
+    m.appendChild(b);
+    m.appendChild(s);
+    msgs.appendChild(m);
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+function animateEmoji(emoji) {
+    const e = document.createElement('div');
+    e.textContent = emoji;
+    e.style.cssText = `position:fixed;bottom:50px;left:${40 + Math.random() * 20}%;font-size:40px;transition:2s;opacity:1;z-index:999999;pointer-events:none;`;
+    document.body.appendChild(e);
+    setTimeout(() => { e.style.transform = 'translateY(-400px)'; e.style.opacity = '0'; }, 50);
+    setTimeout(() => e.remove(), 2100);
+}
+
+function showToast(text, color) {
+    const t = document.createElement('div');
+    t.textContent = text;
+    t.style.cssText = `position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#111;color:${color || '#fff'};padding:8px 16px;border-radius:10px;z-index:999999;font-size:13px;border:1px solid rgba(255,255,255,0.1);pointer-events:none;`;
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 3000);
+}
+
+function updateButtons() {
+    const set = (id, c) => { const el = document.getElementById(id); if (el) el.style.background = c ? '#6366f1' : 'rgba(255,255,255,0.1)'; };
+    set('ss-b-chat', isChatOpen);
+    set('ss-b-mic', isMicOn);
+    set('ss-b-cam', isCamOn);
+}
+
+function updateParticipantPanel() {
+    const p = document.getElementById('ss-participants');
+    if (!p || !roomState?.users) return;
+    p.innerHTML = '';
+    const title = document.createElement('div');
+    title.style.cssText = 'font-size:11px;font-weight:700;color:#6366f1;margin-bottom:8px;letter-spacing:0.05em;';
+    title.textContent = 'USERS ONLINE';
+    p.appendChild(title);
+    roomState.users.forEach(u => {
+        const row = document.createElement('div');
+        row.style.cssText = 'font-size:12px;margin-bottom:5px;display:flex;align-items:center;gap:6px;';
+        const dot = document.createElement('div');
+        dot.style.cssText = 'width:6px;height:6px;background:#10b981;border-radius:50%;flex-shrink:0;';
+        const name = document.createElement('span');
+        name.textContent = u.username + (u.isHost ? ' 👑' : '');
+        row.appendChild(dot);
+        row.appendChild(name);
+        p.appendChild(row);
+    });
+}
+
+// ─── UI INJECTION ─────────────────────────────────────────────────────────────
 function injectUI() {
-    if (document.getElementById('ss-root')) return;
+    if (!IS_TOP_FRAME || document.getElementById('ss-root')) return;
 
     const root = document.createElement('div');
     root.id = 'ss-root';
-    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483640;font-family:"Inter",sans-serif;';
+    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;font-family:sans-serif;';
     document.body.appendChild(root);
-
-    // CSS for animations and stars
-    const style = document.createElement('style');
-    style.textContent = `
-        @keyframes ss-star-float {
-            from { transform: translateY(0); }
-            to { transform: translateY(-100vh); }
-        }
-        @keyframes ss-glow {
-            0%, 100% { box-shadow: 0 0 5px rgba(99,102,241,0.2); }
-            50% { box-shadow: 0 0 15px rgba(99,102,241,0.5); }
-        }
-        .ss-star {
-            position: absolute; background: white; border-radius: 50%; opacity: 0.5;
-            animation: ss-star-float linear infinite;
-        }
-        .ss-glass {
-            background: rgba(0, 0, 0, 0.75) !important;
-            backdrop-filter: blur(20px) saturate(180%) !important;
-            border: 1px solid rgba(255, 255, 255, 0.08) !important;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8) !important;
-        }
-    `;
-    document.head.appendChild(style);
-
-    // Star Background
-    const stars = document.createElement('div');
-    stars.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:-1;';
-    for(let i=0; i<50; i++) {
-        const s = document.createElement('div');
-        s.className = 'ss-star';
-        const size = Math.random() * 2 + 1;
-        s.style.width = size + 'px';
-        s.style.height = size + 'px';
-        s.style.left = Math.random() * 100 + 'vw';
-        s.style.top = Math.random() * 100 + 'vh';
-        s.style.animationDuration = (Math.random() * 10 + 20) + 's';
-        stars.appendChild(s);
-    }
-    root.appendChild(stars);
 
     // Dock
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.className = 'ss-glass';
-    dock.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:24px;display:flex;gap:10px;align-items:center;pointer-events:auto;z-index:2147483647;transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);';
+    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:10px;background:rgba(0,0,0,0.9);backdrop-filter:blur(20px);border-radius:30px;display:flex;gap:10px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.1);';
 
-    // Now Playing Bar (Subtle)
-    const np = document.createElement('div');
-    np.id = 'ss-now-playing';
-    np.style.cssText = 'margin-right:12px;padding-right:12px;border-right:1px solid rgba(255,255,255,0.1);max-width:200px;';
-    np.innerHTML = `
-        <div style="font-size:9px;color:#818cf8;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;">Now Playing</div>
-        <div id="ss-np-title" style="font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Searching...</div>
-    `;
-    dock.appendChild(np);
-
-    const mkBtn = (emoji, id, handler, tip) => {
+    const mkBtn = (emoji, id, h) => {
         const b = document.createElement('button');
         b.id = id; b.innerHTML = emoji;
-        b.title = tip;
-        b.style.cssText = 'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.05);color:#fff;width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all 0.2s;outline:none;';
-        b.addEventListener('mouseenter', () => b.style.background = 'rgba(255,255,255,0.15)');
-        b.addEventListener('mouseleave', () => updateButtons());
-        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handler(); }, true);
+        b.style.cssText = 'background:rgba(255,255,255,0.1);border:none;color:#fff;width:40px;height:40px;border-radius:50%;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:0.2s;';
+        b.onclick = (e) => { e.stopPropagation(); h(); };
         return b;
     };
 
-    dock.appendChild(mkBtn('💬', 'ss-b-chat',  () => { isChatOpen = !isChatOpen;  document.getElementById('ss-chat').style.display = isChatOpen ? 'flex' : 'none'; updateButtons(); }, 'Chat (Alt+T)'));
-    dock.appendChild(mkBtn('🎤', 'ss-b-mic',   () => { isMicOn = !isMicOn;  updateMedia(); }, 'Mic (Alt+M)'));
-    dock.appendChild(mkBtn('📷', 'ss-b-cam',   () => { isCamOn = !isCamOn;  updateMedia(); }, 'Camera (Alt+C)'));
-    dock.appendChild(mkBtn('😊', 'ss-b-emoji', () => { isEmojiOpen = !isEmojiOpen; document.getElementById('ss-emoji').style.display = isEmojiOpen ? 'flex' : 'none'; updateButtons(); }, 'Emoji (Alt+E)'));
-    dock.appendChild(mkBtn('👥', 'ss-b-people', () => { const pp = document.getElementById('ss-participants'); if(pp) pp.style.display = pp.style.display === 'none' ? 'block' : 'none'; }, 'People (Alt+P)'));
+    dock.appendChild(mkBtn('💬', 'ss-b-chat', () => {
+        isChatOpen = !isChatOpen;
+        document.getElementById('ss-chat').style.display = isChatOpen ? 'flex' : 'none';
+        updateButtons();
+    }));
+    dock.appendChild(mkBtn('🎤', 'ss-b-mic', () => { isMicOn = !isMicOn; updateMedia(); }));
+    dock.appendChild(mkBtn('📷', 'ss-b-cam', () => { isCamOn = !isCamOn; updateMedia(); }));
+    dock.appendChild(mkBtn('👥', 'ss-b-people', () => {
+        const p = document.getElementById('ss-participants');
+        if (p) p.style.display = p.style.display === 'none' ? 'block' : 'none';
+    }));
+
+    ['❤️', '😂', '🔥', '😮', '👏'].forEach(em => {
+        dock.appendChild(mkBtn(em, '', () => chrome.runtime.sendMessage({ type: 'REACTION', emoji: em })));
+    });
+
     root.appendChild(dock);
+
+    // Chat panel (built with DOM — no innerHTML with user data)
+    const chat = document.createElement('div');
+    chat.id = 'ss-chat';
+    chat.style.cssText = 'position:fixed;bottom:90px;right:24px;width:280px;height:350px;background:rgba(0,0,0,0.95);border:1px solid rgba(255,255,255,0.1);border-radius:15px;display:none;flex-direction:column;pointer-events:auto;';
+    root.appendChild(chat);
+
+    const chatHeader = document.createElement('div');
+    chatHeader.style.cssText = 'padding:10px;border-bottom:1px solid #333;color:#fff;font-size:12px;font-weight:700;';
+    chatHeader.textContent = 'CHAT';
+    chat.appendChild(chatHeader);
+
+    const msgs = document.createElement('div');
+    msgs.id = 'ss-msgs';
+    msgs.style.cssText = 'flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:5px;';
+    chat.appendChild(msgs);
+
+    const chatFooter = document.createElement('div');
+    chatFooter.style.cssText = 'padding:10px;display:flex;gap:5px;';
+    const chatInput = document.createElement('input');
+    chatInput.id = 'ss-chat-in';
+    chatInput.placeholder = 'Type...';
+    chatInput.autocomplete = 'off';
+    chatInput.style.cssText = 'flex:1;background:#222;border:none;color:#fff;padding:8px;border-radius:8px;font-size:12px;outline:none;';
+    const sendBtn = document.createElement('button');
+    sendBtn.id = 'ss-chat-send';
+    sendBtn.textContent = '>';
+    sendBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;padding:0 12px;border-radius:8px;cursor:pointer;font-weight:700;';
+    chatFooter.appendChild(chatInput);
+    chatFooter.appendChild(sendBtn);
+    chat.appendChild(chatFooter);
+
+    const sendMessage = () => {
+        const text = chatInput.value.trim();
+        if (text) {
+            chrome.runtime.sendMessage({ type: 'CHAT_MESSAGE', text });
+            chatInput.value = '';
+        }
+    };
+    sendBtn.onclick = sendMessage;
+    // Prevent page hotkeys from firing while typing in chat
+    chatInput.addEventListener('keydown', e => e.stopPropagation());
+    chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
+
+    // Participants panel
+    const pP = document.createElement('div');
+    pP.id = 'ss-participants';
+    pP.style.cssText = 'position:fixed;bottom:90px;left:24px;width:200px;background:rgba(0,0,0,0.95);border:1px solid rgba(255,255,255,0.1);border-radius:15px;padding:12px;display:none;color:#fff;pointer-events:auto;';
+    root.appendChild(pP);
 
     // Video grid
     const grid = document.createElement('div');
     grid.id = 'ss-grid';
-    grid.style.cssText = 'position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:12px;align-items:flex-end;pointer-events:none;';
+    grid.style.cssText = 'position:fixed;top:20px;right:20px;display:flex;flex-direction:column;gap:10px;pointer-events:none;';
     root.appendChild(grid);
-
-    // Participants panel
-    const pPanel = document.createElement('div');
-    pPanel.id = 'ss-participants';
-    pPanel.className = 'ss-glass';
-    pPanel.style.cssText = 'position:fixed;bottom:90px;left:24px;width:200px;border-radius:16px;padding:12px;pointer-events:auto;display:none;';
-    root.appendChild(pPanel);
-
-    // Chat
-    const chat = document.createElement('div');
-    chat.id = 'ss-chat';
-    chat.className = 'ss-glass';
-    chat.style.cssText = 'position:fixed;bottom:90px;right:24px;width:300px;height:400px;border-radius:16px;display:none;flex-direction:column;pointer-events:auto;';
-    chat.innerHTML = `
-        <div style="padding:12px 16px;color:#fff;font-weight:700;font-size:12px;display:flex;justify-content:space-between;align-items:center;">
-            <span style="letter-spacing:0.05em;">COSMIC CHAT</span>
-            <button id="ss-chat-x" style="background:none;border:none;color:#555;cursor:pointer;font-size:14px;">✕</button>
-        </div>
-        <div id="ss-msgs" style="flex:1;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:8px;"></div>
-        <div style="padding:16px;display:flex;gap:8px;">
-            <input id="ss-chat-in" placeholder="Message to nebula..." style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.05);color:#fff;padding:10px 14px;border-radius:12px;font-size:12px;outline:none;">
-            <button id="ss-chat-send" style="background:#6366f1;border:none;color:#fff;width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:14px;box-shadow:0 0 15px rgba(99,102,241,0.3);">></button>
-        </div>`;
-    root.appendChild(chat);
-
-    document.getElementById('ss-chat-x').onclick    = () => { isChatOpen = false; chat.style.display = 'none'; updateButtons(); };
-    document.getElementById('ss-chat-in').onkeydown  = e => e.stopPropagation();
-    document.getElementById('ss-chat-in').onkeypress = e => { e.stopPropagation(); if (e.key === 'Enter') document.getElementById('ss-chat-send').click(); };
-    document.getElementById('ss-chat-send').onclick  = () => {
-        const inp = document.getElementById('ss-chat-in');
-        if (inp.value.trim()) { chrome.runtime.sendMessage({ type: 'CHAT_MESSAGE', text: inp.value.trim() }); inp.value = ''; }
-    };
-
-    // Emoji bar
-    const emojiBar = document.createElement('div');
-    emojiBar.id = 'ss-emoji';
-    emojiBar.className = 'ss-glass';
-    emojiBar.style.cssText = 'position:fixed;bottom:85px;left:50%;transform:translateX(-50%);display:none;gap:12px;padding:10px 20px;border-radius:30px;pointer-events:auto;';
-    ['😂','❤️','😮','👏','😡'].forEach(em => {
-        const b = document.createElement('button');
-        b.textContent = em;
-        b.style.cssText = 'background:none;border:none;font-size:24px;cursor:pointer;line-height:1;transition:transform 0.2s;';
-        b.onmouseenter = () => b.style.transform = 'scale(1.3)';
-        b.onmouseleave = () => b.style.transform = 'scale(1)';
-        b.onclick = (e) => { e.stopPropagation(); chrome.runtime.sendMessage({ type: 'REACTION', emoji: em }); };
-        emojiBar.appendChild(b);
-    });
-    root.appendChild(emojiBar);
-
-    // Initial Sync Indicator (Subtle)
-    const syncIndicator = document.createElement('div');
-    syncIndicator.id = 'ss-sync-indicator';
-    syncIndicator.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.9);color:#fff;padding:6px 14px;border-radius:20px;font-size:11px;font-weight:600;z-index:2147483648;pointer-events:none;transition:opacity 0.5s;display:none;box-shadow:0 0 15px rgba(99,102,241,0.4);letter-spacing:0.05em;';
-    syncIndicator.textContent = 'SYNCING VIDEO...';
-    root.appendChild(syncIndicator);
-
-    updateButtons();
 }
 
-function updateButtons() {
-    const activeColor = '#6366f1';
-    const idleColor   = 'rgba(255,255,255,0.05)';
-    
-    const setStyle = (id, active) => {
-        const el = document.getElementById(id);
-        if (el) {
-            el.style.background = active ? activeColor : idleColor;
-            el.style.animation = active ? 'ss-glow 2s infinite' : 'none';
-        }
-    };
-    
-    setStyle('ss-b-chat',  isChatOpen);
-    setStyle('ss-b-emoji', isEmojiOpen);
-    setStyle('ss-b-mic',   isMicOn);
-    setStyle('ss-b-cam',   isCamOn);
-}
-
-function updateButtons() {
-    const active = '#6366f1';
-    const idle   = 'rgba(255,255,255,0.08)';
-    const setbg  = (id, cond) => { const el = document.getElementById(id); if (el) el.style.background = cond ? active : idle; };
-    setbg('ss-b-chat',  isChatOpen);
-    setbg('ss-b-emoji', isEmojiOpen);
-    setbg('ss-b-mic',   isMicOn);
-    setbg('ss-b-cam',   isCamOn);
-}
-
-function addChatMessage(username, text, color) {
-    const area = document.getElementById('ss-msgs');
-    if (!area) return;
-    const d = document.createElement('div');
-    d.style.cssText = 'background:rgba(255,255,255,0.04);padding:6px 8px;border-radius:6px;font-size:12px;color:#ddd;';
-    d.innerHTML = `<b style="color:${color || '#818cf8'}">${username}</b>: ${text}`;
-    area.appendChild(d);
-    area.scrollTop = area.scrollHeight;
-}
-
-function animateEmoji(emoji) {
-    const el = document.createElement('div');
-    el.textContent = emoji;
-    el.style.cssText = 'position:fixed;bottom:120px;left:50%;font-size:52px;z-index:99999;pointer-events:none;transition:transform 2s ease-out,opacity 2s ease-out;opacity:1;';
-    document.body.appendChild(el);
-    requestAnimationFrame(() => {
-        el.style.transform = `translateX(${(Math.random()-0.5)*300}px) translateY(-400px) scale(2)`;
-        el.style.opacity = '0';
-    });
-    setTimeout(() => el.remove(), 2100);
-}
-
-// ─── MESSAGE ROUTER ─────────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
-    // SYNC is allowed in all frames
-    if (msg.type === 'SYNC_STATE') {
-        applyRemoteSync(msg);
-        return;
-    }
-
-    // EVERYTHING ELSE (WebRTC, UI, Chat) is for the UI Master ONLY
-    if (!canShowUI) return;
-
-    switch (msg.type) {
-        case 'CHAT_MESSAGE':
-            addChatMessage(msg.username, msg.text, msg.color);
-            break;
-
-        case 'REACTION':
-            animateEmoji(msg.emoji);
-            break;
-
-        case 'ROOM_STATE':
-            roomState = msg.data;
-            if (roomState.myId) {
-                initPeers();
-                if (roomState.isHost && videoElement) broadcastState();
-            }
-            updateParticipantPanel();
-            break;
-
-        case 'SIGNALING':
-            handleSignaling(msg.fromId, msg.payload);
-            break;
-
-        case 'TOAST':
-            const t = document.createElement('div');
-            t.textContent = msg.message;
-            t.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);color:${msg.color||'#fff'};padding:10px 18px;border-radius:8px;font-size:13px;z-index:99999;pointer-events:none;`;
-            document.body.appendChild(t);
-            setTimeout(() => t.remove(), 3000);
-            break;
-    }
-});
-
-// ─── MAIN LOOP (1s) ─────────────────────────────────────────────────────────────
-let lastTitle = '';
+// ─── MAIN LOOP ─────────────────────────────────────────────────────────────────
 setInterval(() => {
-    // Only inject UI in the Master frame (prevents double dock)
-    if (canShowUI && !document.getElementById('ss-root')) injectUI();
+    if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
 
-    // Find video in ANY frame (including iframes)
-    if (videoElement && !document.body.contains(videoElement)) videoElement = null;
-    if (!videoElement) {
-        videoElement = findMainVideo();
-        if (videoElement) { console.log('[SyncStream] Video attached in', location.hostname); attachSyncListeners(); }
+    const v = findMainVideo();
+    if (v && v !== videoElement) {
+        videoElement = v;
+        v.onplay      = () => broadcastState('play');
+        v.onpause     = () => broadcastState('pause');
+        v.onseeked    = () => broadcastState('seek');
+        v.onratechange = () => broadcastState('rate');
     }
-
-    // Update Now Playing Title
-    if (canShowUI) {
-        let title = document.title;
-        if (location.hostname.includes('youtube')) {
-            const yt = document.querySelector('h1.ytd-video-primary-info-renderer');
-            if (yt) title = yt.innerText;
-        } else if (location.hostname.includes('dizigom')) {
-            const dz = document.querySelector('.section-title h1');
-            if (dz) title = dz.innerText;
-        }
-        
-        if (title !== lastTitle) {
-            lastTitle = title;
-            chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title: title });
-            const np = document.getElementById('ss-np-title');
-            if (np) np.textContent = title;
-        }
-    }
-
-    // Keep remote conference videos alive (Master frame only)
-    if (canShowUI) {
-        document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
-            if (v.id !== 'ss-v-local' && v.srcObject && v.paused) {
-                v.muted = false; v.volume = 1.0; v.play().catch(() => {});
-            }
-        });
-    }
-}, 1000);
-
-console.log('%c[SyncStream] UI Master: ' + canShowUI, 'color: #6366f1; font-weight: bold; font-size: 12px;');
-
-
-// ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
-document.addEventListener('keydown', (e) => {
-    // Only trigger if Alt key is held and no input is focused
-    if (!e.altKey) return;
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-    switch(e.key.toLowerCase()) {
-        case 'm': // Alt+M → toggle mic
-            e.preventDefault();
-            isMicOn = !isMicOn;
-            updateMedia();
-            showShortcutToast(isMicOn ? '🎤 Mic ON' : '🎤 Mic OFF');
-            break;
-        case 'c': // Alt+C → toggle camera
-            e.preventDefault();
-            isCamOn = !isCamOn;
-            updateMedia();
-            showShortcutToast(isCamOn ? '📷 Camera ON' : '📷 Camera OFF');
-            break;
-        case 'e': // Alt+E → toggle emoji bar
-            e.preventDefault();
-            isEmojiOpen = !isEmojiOpen;
-            const eb = document.getElementById('ss-emoji');
-            if (eb) eb.style.display = isEmojiOpen ? 'flex' : 'none';
-            updateButtons();
-            break;
-        case 't': // Alt+T → toggle chat
-            e.preventDefault();
-            isChatOpen = !isChatOpen;
-            const ch = document.getElementById('ss-chat');
-            if (ch) ch.style.display = isChatOpen ? 'flex' : 'none';
-            updateButtons();
-            break;
-        case 'p': // Alt+P → toggle participants panel
-            e.preventDefault();
-            const pp = document.getElementById('ss-participants');
-            if (pp) pp.style.display = pp.style.display === 'none' ? 'block' : 'none';
-            break;
-    }
-}, true);
-
-function showShortcutToast(text) {
-    const t = document.createElement('div');
-    t.textContent = text;
-    t.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.88);color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;z-index:99999;pointer-events:none;font-family:system-ui;';
-    document.body.appendChild(t);
-    setTimeout(() => t.remove(), 1500);
-}
-
-// ─── PARTICIPANT PANEL ────────────────────────────────────────────────────────
-function updateParticipantPanel() {
-    const panel = document.getElementById('ss-participants');
-    if (!panel || !roomState?.users) return;
-    panel.innerHTML = `
-        <div style="font-size:11px;font-weight:600;color:#818cf8;margin-bottom:6px;letter-spacing:0.05em;">PARTICIPANTS (${roomState.users.length})</div>
-        ${roomState.users.map(u => `
-            <div style="display:flex;align-items:center;gap:6px;padding:4px 0;">
-                <div style="width:24px;height:24px;border-radius:50%;background:${u.color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#111;">${u.username.substring(0,2).toUpperCase()}</div>
-                <span style="font-size:11px;color:#ddd;flex:1;">${u.username}${u.isHost ? ' 👑' : ''}</span>
-                <span style="font-size:11px;">${u.isInCall ? '🎤' : ''}</span>
-            </div>
-        `).join('')}
-    `;
-}
-
+}, 500);

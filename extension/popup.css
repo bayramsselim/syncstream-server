@@ -16,28 +16,17 @@
 body {
     width: 320px;
     height: 520px;
-    background: var(--bg-deep);
+    background: radial-gradient(circle at top right, #1a1c2e 0%, #000000 100%);
     color: var(--text-main);
     overflow: hidden;
     position: relative;
 }
 
-/* 🌌 Yıldız Arka Planı */
-.cosmic-bg {
-    position: fixed; inset: 0; z-index: -1;
-    background: radial-gradient(circle at top right, #13111b 0%, #000000 70%);
+.back-link {
+    background: none; border: none; color: var(--text-dim); font-size: 11px; cursor: pointer;
+    margin-top: 10px; align-self: center; transition: color 0.2s;
 }
-
-.star {
-    position: absolute; background: #fff; border-radius: 50%;
-    animation: twinkle linear infinite;
-}
-
-@keyframes twinkle {
-    0% { opacity: 0; transform: scale(0.5); }
-    50% { opacity: 0.6; transform: scale(1); }
-    100% { opacity: 0; transform: scale(0.5); }
-}
+.back-link:hover { color: var(--accent); }
 
 .glass-container {
     width: 100%; height: 100%;

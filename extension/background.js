@@ -2,10 +2,9 @@ let socket = null;
 let currentRoom = null;
 let reconnectTimer = null;
 
-const SERVER_URL = 'wss://syncstream-server.onrender.com';
-let uiMasters = new Map();
+const SERVER_URL = 'wss://sync-watch-pro.onrender.com';
 
-// Load saved room data on startup
+// Restore room on service worker restart
 chrome.storage.local.get(['roomData'], (result) => {
     if (result.roomData) {
         currentRoom = result.roomData;
@@ -15,31 +14,23 @@ chrome.storage.local.get(['roomData'], (result) => {
 
 function connectWebSocket() {
     if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
-    
+
     socket = new WebSocket(SERVER_URL);
 
     socket.onopen = () => {
-        console.log('[SyncStream] WebSocket Connected');
-        broadcastConnectionStatus(true);
-        // If we were already in a room, rejoin it automatically
+        console.log('[SyncStream] Connected');
+        broadcastToPopup({ type: 'CONNECTION_STATUS', connected: true });
         if (currentRoom?.roomId) {
-            socket.send(JSON.stringify({ 
-                type: 'JOIN_ROOM', 
-                roomId: currentRoom.roomId, 
-                username: currentRoom.myUsername 
-            }));
+            socket.send(JSON.stringify({ type: 'JOIN_ROOM', roomId: currentRoom.roomId, username: currentRoom.myUsername }));
         }
     };
 
     socket.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
-            
+
             if (data.type === 'ROOM_UPDATE') {
-                // Find my current info in the user list
                 const me = data.users.find(u => u.username === currentRoom?.myUsername);
-                
-                // Construct complete state
                 currentRoom = {
                     roomId: data.roomId,
                     users: data.users,
@@ -49,98 +40,84 @@ function connectWebSocket() {
                     isHost: me?.isHost || false,
                     nowPlaying: data.nowPlaying || currentRoom?.nowPlaying
                 };
-
                 chrome.storage.local.set({ roomData: currentRoom });
-                sendToPopup({ type: 'ROOM_STATE', data: currentRoom });
-                sendToTabs({ type: 'ROOM_STATE', data: currentRoom });
-            } 
+                // Send as ROOM_STATE so popup and content.js can handle it uniformly
+                const roomMsg = { type: 'ROOM_STATE', data: currentRoom };
+                broadcastToPopup(roomMsg);
+                broadcastToTabs(roomMsg);
+            }
             else if (data.type === 'NOW_PLAYING') {
                 if (currentRoom) {
                     currentRoom.nowPlaying = data.title;
-                    sendToPopup({ type: 'ROOM_STATE', data: currentRoom });
+                    broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom });
                 }
-                sendToTabs(data);
+                broadcastToTabs(data);
+            }
+            else if (data.type === 'ERROR') {
+                broadcastToPopup({ type: 'JOIN_ERROR', message: data.message });
             }
             else {
-                // Forward other messages (SYNC_STATE, CHAT, etc.) to tabs
-                sendToTabs(data);
+                broadcastToTabs(data);
             }
-        } catch (e) {
-            console.error('[SyncStream] Message error:', e);
-        }
+        } catch (e) { console.error('[SyncStream] Message error:', e); }
     };
 
     socket.onclose = () => {
-        console.log('[SyncStream] WebSocket Closed');
-        broadcastConnectionStatus(false);
+        console.log('[SyncStream] Disconnected');
+        broadcastToPopup({ type: 'CONNECTION_STATUS', connected: false });
         clearTimeout(reconnectTimer);
         reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
 }
 
-function sendToTabs(msg) {
+function broadcastToTabs(msg) {
     chrome.tabs.query({}, (tabs) => {
         tabs.forEach(tab => chrome.tabs.sendMessage(tab.id, msg).catch(() => {}));
     });
 }
 
-function sendToPopup(msg) {
+function broadcastToPopup(msg) {
     chrome.runtime.sendMessage(msg).catch(() => {});
-}
-
-function broadcastConnectionStatus(isConnected) {
-    sendToPopup({ type: 'CONNECTION_STATUS', connected: isConnected });
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.type === 'GET_ROOM_STATE') {
         sendResponse(currentRoom);
-    } 
+    }
     else if (request.type === 'CREATE_ROOM' || request.type === 'JOIN_ROOM') {
         currentRoom = { myUsername: request.username, roomId: request.roomId || null };
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
-            connectWebSocket();
-            // Wait for connection then send
-            setTimeout(() => {
-                if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(request));
-            }, 1500);
+        const payload = JSON.stringify(request);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(payload);
         } else {
-            socket.send(JSON.stringify(request));
+            // Queue message; fire immediately when socket opens
+            connectWebSocket();
+            const sendOnOpen = () => { socket.send(payload); socket.removeEventListener('open', sendOnOpen); };
+            socket.addEventListener('open', sendOnOpen);
         }
-    } 
+    }
     else if (request.type === 'LEAVE_ROOM') {
+        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'LEAVE_ROOM' }));
         currentRoom = null;
         chrome.storage.local.remove('roomData');
-        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'LEAVE_ROOM' }));
-    } 
+    }
+    else if (request.type === 'TOGGLE_HOST_CONTROL') {
+        if (socket?.readyState === WebSocket.OPEN && currentRoom?.roomId) {
+            socket.send(JSON.stringify({ type: 'TOGGLE_HOST_CONTROL', roomId: currentRoom.roomId, value: request.value }));
+        }
+    }
     else if (['PLAYER_EVENT', 'CHAT_MESSAGE', 'REACTION', 'UPDATE_NOW_PLAYING', 'SIGNALING', 'TOGGLE_CALL'].includes(request.type)) {
         if (socket?.readyState === WebSocket.OPEN && currentRoom?.roomId) {
             request.roomId = currentRoom.roomId;
             socket.send(JSON.stringify(request));
         }
     }
-    else if (request.type === 'GET_UI_PERMISSION') {
-        const tabId = sender.tab.id;
-        const frameId = sender.frameId;
-        if (!uiMasters.has(tabId)) {
-            uiMasters.set(tabId, frameId);
-            sendResponse({ canShow: true });
-        } else {
-            sendResponse({ canShow: uiMasters.get(tabId) === frameId });
-        }
-    }
     return true;
 });
 
-// Tab management
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (changeInfo.status === 'loading') uiMasters.delete(tabId);
-});
-chrome.tabs.onRemoved.addListener((tabId) => uiMasters.delete(tabId));
-
 connectWebSocket();
 
-// Keep-alive
+// Keep Render free tier awake
 setInterval(() => {
-    fetch('https://syncstream-server.onrender.com/health').catch(() => {});
+    fetch('https://sync-watch-pro.onrender.com/health').catch(() => {});
 }, 5 * 60 * 1000);

@@ -2,76 +2,44 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SyncStream Pro</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="popup.css">
+    <style>
+        body { width: 300px; padding: 20px; background: #000; color: #fff; font-family: sans-serif; }
+        .view { display: none; flex-direction: column; gap: 15px; }
+        .active { display: flex; }
+        h2 { font-size: 18px; margin: 0; color: #6366f1; }
+        input { background: #111; border: 1px solid #333; color: #fff; padding: 10px; border-radius: 8px; outline: none; }
+        button { background: #6366f1; color: #fff; border: none; padding: 12px; border-radius: 8px; cursor: pointer; font-weight: 700; transition: 0.2s; }
+        button:hover { background: #4f46e5; }
+        .secondary { background: #222; }
+        .room-info { background: #111; padding: 15px; border-radius: 10px; border: 1px solid #333; text-align: center; }
+        .code { font-size: 24px; font-weight: 700; color: #6366f1; letter-spacing: 2px; margin: 10px 0; }
+    </style>
 </head>
 <body>
-    <div id="star-container" class="cosmic-bg"></div>
-    
-    <div class="glass-container">
-        <header>
-            <div class="logo">
-                <div class="play-icon"></div>
-                <h1>SyncStream <span style="color:var(--accent); font-size:10px;">PRO</span></h1>
-            </div>
-            <div class="status-indicator" id="connection-status"></div>
-        </header>
-
-        <main>
-            <!-- 🪐 Giriş Ekranı -->
-            <div id="join-view" class="view">
-                <div class="welcome-text">
-                    Watch videos together, <br> synced in real-time.
-                </div>
-                
-                <div class="input-group">
-                    <label>DISPLAY NAME</label>
-                    <input type="text" id="username-input" placeholder="How should we call you?" autocomplete="off">
-                </div>
-                
-                <div class="input-group">
-                    <label>ROOM CODE (OPTIONAL)</label>
-                    <input type="text" id="room-input" placeholder="Enter code to join" maxlength="6" autocomplete="off">
-                </div>
-                
-                <div class="action-buttons">
-                    <button id="main-action-btn" class="btn primary-btn">START WATCHING</button>
-                    <div id="create-hint" style="font-size:10px; color:var(--text-dim); text-align:center;">
-                        No code? We'll create a new room for you.
-                    </div>
-                </div>
-            </div>
-
-            <!-- 🛸 Aktif Oda Ekranı -->
-            <div id="room-view" class="view" style="display: none;">
-                <div class="room-card">
-                    <span class="room-label">SHARE THIS CODE</span>
-                    <div class="room-code" id="current-room-code">----</div>
-                    <div style="display:flex; gap:8px; width:100%;">
-                        <button id="copy-code-btn" class="share-btn" style="flex:1">Copy Code</button>
-                        <button id="copy-link-btn" class="share-btn" style="flex:1">Copy Link</button>
-                    </div>
-                </div>
-
-                <div class="section-label">PEOPLE IN ROOM</div>
-                <div id="user-list" class="user-list"></div>
-
-                <div class="now-playing-box">
-                    <div class="section-label">NOW WATCHING</div>
-                    <div id="now-playing-title" class="np-title">Scanning...</div>
-                </div>
-
-                <div class="host-control" id="host-controls" style="display: none;">
-                    <input type="checkbox" id="host-control-only">
-                    <label for="host-control-only">Only host can control video</label>
-                </div>
-
-                <button id="leave-btn" class="btn danger-btn">Leave Room</button>
-            </div>
-        </main>
+    <div id="view-init" class="view active">
+        <h2>Who are you?</h2>
+        <input id="name-in" placeholder="Your name...">
+        <button id="btn-next">NEXT</button>
     </div>
+
+    <div id="view-action" class="view">
+        <h2>Hello, <span id="user-name-label"></span>!</h2>
+        <button id="btn-create">CREATE ROOM</button>
+        <div style="text-align: center; color: #555;">- or -</div>
+        <input id="join-code-in" placeholder="Enter Room Code">
+        <button id="btn-join" class="secondary">JOIN ROOM</button>
+    </div>
+
+    <div id="view-room" class="view">
+        <div class="room-info">
+            <div style="font-size: 11px; color: #555;">ROOM CODE</div>
+            <div id="room-code-display" class="code">------</div>
+            <button id="btn-copy" class="secondary" style="width: 100%;">COPY CODE</button>
+            <button id="btn-leave" style="background: #ef4444; width: 100%;">LEAVE ROOM</button>
+        </div>
+    </div>
+
     <script src="popup.js"></script>
 </body>
 </html>
