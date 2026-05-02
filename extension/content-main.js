@@ -58,6 +58,10 @@
             r.style.setProperty('position', 'fixed', 'important');
             r.style.setProperty('inset',    '0',     'important');
         }
+        /* Continuous bump — even when no fake-fs is active, so if a site uses
+           CSS-only fake-fullscreen (own position:fixed overlay) ss-root still
+           paints on top. Cheap (single getElementById + appendChild check). */
+        setInterval(bumpSsRoot, 500);
 
         /* Properties on ancestor elements that create a containing block for
            position:fixed children (so 100vw/100vh would size to the ancestor,
@@ -170,17 +174,20 @@
             var orig = HTMLElement.prototype[k];
             if (!orig) return;
             HTMLElement.prototype[k] = function () {
+                console.log('[SS-FS] L1 top-frame intercept:', this.tagName, 'id=', this.id, 'class=', this.className, 'isActive=', isActive());
                 if (!isActive()) return orig.apply(this, arguments);
                 if (this.tagName === 'IFRAME') {
+                    console.log('[SS-FS] L1: target IS iframe → fake-fs');
                     enterFake(this);
                     return Promise.resolve();
                 }
                 var inner = dominantIframe(this);
                 if (inner) {
+                    console.log('[SS-FS] L1: dominant iframe found → fake-fs');
                     enterFake(inner);
                     return Promise.resolve();
                 }
-                /* No iframe → let real fullscreen happen (YouTube path) */
+                console.log('[SS-FS] L1: no dominant iframe → REAL fullscreen (YouTube path)');
                 return orig.apply(this, arguments);
             };
         });
@@ -188,7 +195,12 @@
         /* ── L2: receive SS_FS_REQ from iframe's intercept ── */
         window.addEventListener('message', function (e) {
             if (!e.data || !isActive()) return;
-            if      (e.data.type === 'SS_FS_REQ')  { var fr = findFrameByWindow(e.source); if (fr) enterFake(fr); }
+            if (e.data.type === 'SS_FS_REQ') {
+                console.log('[SS-FS] L2 received SS_FS_REQ from iframe');
+                var fr = findFrameByWindow(e.source);
+                console.log('[SS-FS] L2: found iframe?', !!fr, fr);
+                if (fr) enterFake(fr);
+            }
             else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
         });
 
@@ -331,13 +343,19 @@
         var orig = HTMLElement.prototype[k];
         if (!orig) return;
         HTMLElement.prototype[k] = function () {
+            console.log('[SS-FS] iframe intercept:', this.tagName, 'isActive=', isActive(), 'msgActive=', msgActive, 'origin=', location.origin);
             if (!isActive()) return orig.apply(this, arguments);
             if (fsOn) { fakeExit(); return Promise.resolve(); }
+            console.log('[SS-FS] iframe → posting SS_FS_REQ to top');
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
             return new Promise(function (resolve) {
                 pendingResolve = resolve;
                 setTimeout(function () {
-                    if (pendingResolve === resolve) { pendingResolve = null; resolve(); }
+                    if (pendingResolve === resolve) {
+                        pendingResolve = null;
+                        console.log('[SS-FS] iframe: SS_FS_ON timeout — top frame did not respond');
+                        resolve();
+                    }
                 }, 1000);
             });
         };
