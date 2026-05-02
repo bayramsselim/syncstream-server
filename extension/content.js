@@ -35,17 +35,28 @@ const ICE_SERVERS = {
     ]
 };
 
-console.log('[SyncStream] v5.0 loaded');
+// ─── FRAME GUARD ────────────────────────────────────────────────────────────────
+// UI + WebRTC: only in the top (main) frame
+// Video Sync: in ALL frames (iframe players like dizigom)
+const IS_TOP_FRAME = (window === window.top);
+
+console.log(`[SyncStream] v5.1 loaded | top=${IS_TOP_FRAME} | ${location.hostname}`);
 
 // ─── INIT ──────────────────────────────────────────────────────────────────────
-chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-    if (chrome.runtime.lastError || !res) return;
-    roomState = res;
-    // Only init peers if we already have our own ID from server
-    if (roomState.myId) initPeers();
-    // If we are host, broadcast current time so late joiners sync
-    if (roomState.isHost && videoElement) broadcastState();
-});
+// Only init WebRTC/peers from top frame to avoid duplicate connections
+if (IS_TOP_FRAME) {
+    chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+        if (chrome.runtime.lastError || !res) return;
+        roomState = res;
+        if (roomState.myId) initPeers();
+        if (roomState.isHost && videoElement) broadcastState();
+    });
+} else {
+    // In iframe: still need roomState for sync guard (hostControlOnly check)
+    chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+        if (!chrome.runtime.lastError && res) roomState = res;
+    });
+}
 
 // ─── VIDEO SYNC ────────────────────────────────────────────────────────────────
 function findMainVideo() {
@@ -534,18 +545,24 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 // ─── MAIN LOOP (1s) ─────────────────────────────────────────────────────────────
 setInterval(() => {
-    if (!document.getElementById('ss-root')) injectUI();
+    // Only inject UI in top frame (prevents double dock in iframe sites)
+    if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
+
+    // Find video in ANY frame (iframe sites like dizigom need this)
     if (videoElement && !document.body.contains(videoElement)) videoElement = null;
     if (!videoElement) {
         videoElement = findMainVideo();
-        if (videoElement) { console.log('[SyncStream] Main video attached'); attachSyncListeners(); }
+        if (videoElement) { console.log('[SyncStream] Video found in', location.hostname); attachSyncListeners(); }
     }
-    // Keep remote conference videos alive, independent of main player
-    document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
-        if (v.id !== 'ss-v-local' && v.srcObject && v.paused) {
-            v.muted = false; v.volume = 1.0; v.play().catch(() => {});
-        }
-    });
+
+    // Keep remote conference videos alive (top frame only)
+    if (IS_TOP_FRAME) {
+        document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
+            if (v.id !== 'ss-v-local' && v.srcObject && v.paused) {
+                v.muted = false; v.volume = 1.0; v.play().catch(() => {});
+            }
+        });
+    }
 }, 1000);
 
 // ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
