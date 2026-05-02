@@ -103,17 +103,42 @@
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
         }
 
-        /* ── L1: intercept requestFullscreen for <iframe> elements only ──
-           (Wrapper divs are left to real fullscreen so YouTube etc. work.
-           hdfilmcehennemi-style wrappers are caught by L3 below if the iframe
-           is the dominant child.) */
+        /* Find an iframe inside `el` that covers ≥70% of el's area. Used to
+           detect "player wrapper" divs (e.g. webteizle's #embed, semantic UI
+           .ui.embed) without false-positives on YouTube-style players that
+           may contain small ad iframes. */
+        function dominantIframe(el) {
+            var iframes = el.querySelectorAll('iframe');
+            if (!iframes.length) return null;
+            var rEl = el.getBoundingClientRect();
+            var aEl = Math.max(1, rEl.width * rEl.height);
+            for (var i = 0; i < iframes.length; i++) {
+                var ri = iframes[i].getBoundingClientRect();
+                if ((ri.width * ri.height) / aEl >= 0.7) return iframes[i];
+            }
+            return null;
+        }
+
+        /* ── L1: intercept requestFullscreen for <iframe> elements AND
+           player-wrapper divs that contain a dominant iframe.
+           Pure CSS fake-fs path — never touches the Fullscreen API, so no
+           race condition with the player's fullscreenchange handler. */
         ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function (k) {
             var orig = HTMLElement.prototype[k];
             if (!orig) return;
             HTMLElement.prototype[k] = function () {
-                if (!isActive() || this.tagName !== 'IFRAME') return orig.apply(this, arguments);
-                enterFake(this);
-                return Promise.resolve();
+                if (!isActive()) return orig.apply(this, arguments);
+                if (this.tagName === 'IFRAME') {
+                    enterFake(this);
+                    return Promise.resolve();
+                }
+                var inner = dominantIframe(this);
+                if (inner) {
+                    enterFake(inner);
+                    return Promise.resolve();
+                }
+                /* No iframe → let real fullscreen happen (YouTube path) */
+                return orig.apply(this, arguments);
             };
         });
 
@@ -124,25 +149,12 @@
             else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
         });
 
-        /* ── L3: fullscreenchange fallback — abort real iframe-FS if it slips through.
-           Handles BOTH direct iframe-FS and wrapper-div-FS where the iframe is the
-           dominant child (covers >=70% of wrapper area). The dominance check prevents
-           breaking YouTube where the player div may contain small ad iframes. */
+        /* ── L3: fullscreenchange fallback — last resort if real iframe-FS
+           somehow slips past L1 and L2 (e.g. native video controls path). */
         document.addEventListener('fullscreenchange', function () {
             var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
             if (!fsEl || !isActive()) return;
-            var inner = null;
-            if (fsEl.tagName === 'IFRAME') {
-                inner = fsEl;
-            } else {
-                var candidates = fsEl.querySelectorAll('iframe');
-                var fsRect = fsEl.getBoundingClientRect();
-                var fsArea = Math.max(1, fsRect.width * fsRect.height);
-                for (var i = 0; i < candidates.length; i++) {
-                    var r = candidates[i].getBoundingClientRect();
-                    if ((r.width * r.height) / fsArea >= 0.7) { inner = candidates[i]; break; }
-                }
-            }
+            var inner = fsEl.tagName === 'IFRAME' ? fsEl : dominantIframe(fsEl);
             if (!inner) return;
             try { inner.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
             try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
