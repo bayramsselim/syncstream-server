@@ -933,14 +933,19 @@ function injectUI() {
     makeDraggable(dock);
 
     // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
-    document.addEventListener('fullscreenchange', () => {
-        const fsEl = document.fullscreenElement;
-        if (fsEl && fsEl !== root) {
+    function syncRootToFullscreen() {
+        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+        if (fsEl && !fsEl.contains(root)) {
+            // Ensure fullscreen container is a positioning context
+            const pos = getComputedStyle(fsEl).position;
+            if (pos === 'static') fsEl.style.position = 'relative';
             fsEl.appendChild(root);
         } else if (!fsEl && root.parentElement !== document.body) {
             document.body.appendChild(root);
         }
-    });
+    }
+    document.addEventListener('fullscreenchange',       () => setTimeout(syncRootToFullscreen, 0));
+    document.addEventListener('webkitfullscreenchange', () => setTimeout(syncRootToFullscreen, 0));
 
     // ── AWAY DETECTION ────────────────────────────────────────────────────────
     const AWAY_MS = 3 * 60 * 1000;
@@ -1116,6 +1121,21 @@ let loopInterval = null;
 
 function mainLoop() {
     if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
+
+    // Keep root inside the active fullscreen element (fallback in case event missed)
+    if (IS_TOP_FRAME) {
+        const root  = document.getElementById('ss-root');
+        const fsEl  = document.fullscreenElement || document.webkitFullscreenElement;
+        if (root) {
+            if (fsEl && !fsEl.contains(root)) {
+                const pos = getComputedStyle(fsEl).position;
+                if (pos === 'static') fsEl.style.position = 'relative';
+                fsEl.appendChild(root);
+            } else if (!fsEl && root.parentElement !== document.body) {
+                document.body.appendChild(root);
+            }
+        }
+    }
 
     const v = findMainVideo();
     if (v && v !== videoElement) {
