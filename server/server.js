@@ -1,10 +1,12 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
+const VERSION = '6char-codes';
+
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), version: VERSION }));
         return;
     }
     res.writeHead(200, { 'Content-Type': 'text/plain' });
