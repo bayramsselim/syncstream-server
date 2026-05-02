@@ -28,9 +28,10 @@
 
     /* ── TOP FRAME ─────────────────────────────────────────────────────── */
     if (window === window.top) {
-        var fakeEl  = null;
-        var savedSt = null;
-        var PROPS   = ['position','top','left','right','bottom','width','height',
+        var fakeEl   = null;
+        var savedSt  = null;
+        var savedAnc = null;
+        var PROPS    = ['position','top','left','right','bottom','width','height',
                        'z-index','border','border-radius','transform','transition',
                        'max-width','max-height','margin','clip','clip-path'];
 
@@ -58,6 +59,13 @@
             r.style.setProperty('inset',    '0',     'important');
         }
 
+        /* Properties on ancestor elements that create a containing block for
+           position:fixed children (so 100vw/100vh would size to the ancestor,
+           not the viewport). We must neutralise all of these on every ancestor
+           when fake-fs'ing the iframe, otherwise fullscreen will be tiny. */
+        var ANC_PROPS = ['transform','filter','backdrop-filter','perspective',
+                         'will-change','contain','transform-style','overflow'];
+
         function enterFake(fr) {
             if (fakeEl === fr) return;
             if (fakeEl) exitFake();
@@ -84,6 +92,30 @@
             fr.style.setProperty('clip',          'auto',       'important');
             fr.style.setProperty('clip-path',     'none',       'important');
             fr.setAttribute('data-ss-fs', '1');
+
+            /* Walk up ancestors, neutralise containing-block-creating props.
+               Without this, a parent with `transform: translateZ(0)` or similar
+               makes our position:fixed iframe sized relative to that parent — so
+               "fullscreen" comes out as a tiny box. */
+            savedAnc = [];
+            var node = fr.parentElement;
+            while (node && node !== document.documentElement) {
+                var rec = { el: node, props: {} };
+                ANC_PROPS.forEach(function (p) {
+                    rec.props[p] = { v: node.style.getPropertyValue(p), pri: node.style.getPropertyPriority(p) };
+                });
+                node.style.setProperty('transform',        'none',    'important');
+                node.style.setProperty('filter',           'none',    'important');
+                node.style.setProperty('backdrop-filter',  'none',    'important');
+                node.style.setProperty('perspective',      'none',    'important');
+                node.style.setProperty('will-change',      'auto',    'important');
+                node.style.setProperty('contain',          'none',    'important');
+                node.style.setProperty('transform-style',  'flat',    'important');
+                node.style.setProperty('overflow',         'visible', 'important');
+                savedAnc.push(rec);
+                node = node.parentElement;
+            }
+
             bumpSsRoot();
             try { fr.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
         }
@@ -98,6 +130,17 @@
                     fr.style.removeProperty(p);
                 }
             });
+            /* Restore ancestor styles */
+            if (savedAnc) {
+                savedAnc.forEach(function (rec) {
+                    ANC_PROPS.forEach(function (p) {
+                        var s = rec.props[p];
+                        if (s && s.v) rec.el.style.setProperty(p, s.v, s.pri);
+                        else          rec.el.style.removeProperty(p);
+                    });
+                });
+                savedAnc = null;
+            }
             savedSt = null;
             fr.removeAttribute('data-ss-fs');
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
