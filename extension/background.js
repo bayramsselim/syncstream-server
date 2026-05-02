@@ -123,7 +123,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             socket.send(JSON.stringify({ type: 'TOGGLE_HOST_CONTROL', roomId: currentRoom.roomId, value: request.value }));
         }
     }
-    else if (['PLAYER_EVENT', 'CHAT_MESSAGE', 'REACTION', 'UPDATE_NOW_PLAYING', 'SIGNALING', 'TOGGLE_CALL'].includes(request.type)) {
+    else if (['PLAYER_EVENT', 'CHAT_MESSAGE', 'REACTION', 'UPDATE_NOW_PLAYING', 'SIGNALING', 'TOGGLE_CALL', 'USER_STATUS'].includes(request.type)) {
         if (socket?.readyState === WebSocket.OPEN && currentRoom?.roomId) {
             request.roomId = currentRoom.roomId;
             socket.send(JSON.stringify(request));

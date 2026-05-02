@@ -21,7 +21,10 @@ let isScreenSharing = false;
 let isChatOpen      = false;
 let unreadCount     = 0;
 let lastTitle       = '';
-let videoFound      = false; // slows interval after first attach
+let videoFound      = false;
+let lastHostId      = null;
+let isAway          = false;
+let awayTimer       = null;
 
 const IS_TOP_FRAME = (window === window.top);
 const ICE_SERVERS  = {
@@ -42,7 +45,21 @@ chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'SYNC_STATE') { applyRemoteSync(msg); return; }
     if (!IS_TOP_FRAME) return;
 
-    if      (msg.type === 'ROOM_STATE')    { roomState = msg.data; if (roomState.myId) initPeers(); updateParticipantPanel(); syncAvatarTiles(roomState.users || []); const _rt = document.getElementById('ss-reconnect-toast'); if (_rt) _rt.remove(); }
+    if      (msg.type === 'ROOM_STATE')    {
+        const prevHostId = lastHostId;
+        roomState = msg.data;
+        if (roomState.myId) initPeers();
+        updateParticipantPanel();
+        syncAvatarTiles(roomState.users || []);
+        const _rt = document.getElementById('ss-reconnect-toast'); if (_rt) _rt.remove();
+        // Host change notification
+        const newHost = (roomState.users || []).find(u => u.isHost);
+        if (newHost && prevHostId && newHost.id !== prevHostId) {
+            if (newHost.id === roomState.myId) showToast('👑 Artık sen hostsun!', '#f59e0b');
+            else showToast(`👑 ${newHost.username} yeni host`, '#f59e0b');
+        }
+        lastHostId = newHost?.id || null;
+    }
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
     else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
@@ -338,6 +355,7 @@ function createTileShell(id, name, color) {
 
     // Name label
     const lbl = document.createElement('div');
+    lbl.className = 'ss-name-lbl';
     lbl.textContent = name;
     lbl.style.cssText = 'position:absolute;bottom:6px;left:8px;font-size:10px;color:#fff;background:rgba(0,0,0,0.6);padding:2px 7px;border-radius:4px;pointer-events:none;letter-spacing:0.02em;z-index:3;';
     tile.appendChild(lbl);
@@ -439,6 +457,10 @@ function syncAvatarTiles(users) {
         if (!document.getElementById(`ss-vid-${u.id}`)) {
             createTileShell(u.id, u.username, u.color);
             updateGalleryLayout();
+        } else {
+            // Update name label with away/host status
+            const lbl = document.querySelector(`#ss-vid-${u.id} .ss-name-lbl`);
+            if (lbl) lbl.textContent = u.username + (u.isAway ? ' 😴' : '') + (u.isHost ? ' 👑' : '');
         }
     });
 
@@ -474,6 +496,9 @@ function removeVideoTile(id) {
 
 // ─── STATS MONITOR ────────────────────────────────────────────────────────────
 function startStatsMonitor(tid, pc) {
+    let lastQuality = 'good';
+    const BITRATE = { good: undefined, medium: 400_000, poor: 120_000 };
+
     const timer = setInterval(async () => {
         const tile = document.getElementById(`ss-vid-${tid}`);
         if (!tile || pc.iceConnectionState === 'closed' || pc.iceConnectionState === 'failed') {
@@ -492,6 +517,21 @@ function startStatsMonitor(tid, pc) {
                     else if (fps < 15 || loss > 0.05) quality = 'medium';
                 }
             });
+
+            // Auto-adjust outgoing bandwidth when our quality is poor
+            if (quality !== lastQuality) {
+                lastQuality = quality;
+                pc.getSenders().forEach(sender => {
+                    if (sender.track?.kind !== 'video') return;
+                    try {
+                        const params = sender.getParameters();
+                        if (!params.encodings?.length) return;
+                        params.encodings[0].maxBitrate = BITRATE[quality];
+                        sender.setParameters(params).catch(() => {});
+                    } catch (_) {}
+                });
+            }
+
             const clr  = { good: '#10b981', medium: '#f59e0b', poor: '#ef4444' }[quality];
             const tips = { good: 'Bağlantı iyi', medium: 'Bağlantı kararsız', poor: 'Bağlantı zayıf' }[quality];
             sig.style.background = clr;
@@ -621,7 +661,7 @@ function updateParticipantPanel() {
         av.textContent = u.username.charAt(0).toUpperCase();
         const name = document.createElement('span');
         name.style.cssText = 'color:#ddd;flex:1;';
-        name.textContent = u.username + (u.isHost ? ' 👑' : '') + (u.isInCall ? ' 🎤' : '');
+        name.textContent = u.username + (u.isHost ? ' 👑' : '') + (u.isInCall ? ' 🎤' : '') + (u.isAway ? ' 😴' : '');
         row.appendChild(av); row.appendChild(name);
         p.appendChild(row);
     });
@@ -724,6 +764,32 @@ function injectUI() {
 
     root.appendChild(dock);
     makeDraggable(dock);
+
+    // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
+    document.addEventListener('fullscreenchange', () => {
+        const fsEl = document.fullscreenElement;
+        if (fsEl && fsEl !== root) {
+            fsEl.appendChild(root);
+        } else if (!fsEl && root.parentElement !== document.body) {
+            document.body.appendChild(root);
+        }
+    });
+
+    // ── AWAY DETECTION ────────────────────────────────────────────────────────
+    const AWAY_MS = 3 * 60 * 1000;
+    const resetAway = () => {
+        clearTimeout(awayTimer);
+        if (isAway) {
+            isAway = false;
+            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: false }).catch(() => {});
+        }
+        awayTimer = setTimeout(() => {
+            isAway = true;
+            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: true }).catch(() => {});
+        }, AWAY_MS);
+    };
+    ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
+    resetAway();
 
     // ── AUTO-HIDE ─────────────────────────────────────────────────────────────
     let hideTimer;

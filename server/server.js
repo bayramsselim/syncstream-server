@@ -28,8 +28,9 @@ wss.on('connection', (ws) => {
     ws.roomId      = null;
     ws.username    = null;
     ws.isInCall    = false;
-    ws.msgCount    = 0;       // rate limit counter (resets every second)
-    ws.joinTries   = 0;       // brute-force counter
+    ws.isAway      = false;
+    ws.msgCount    = 0;
+    ws.joinTries   = 0;
 
     // Reset rate-limit counter every second
     const rateLimitTimer = setInterval(() => { ws.msgCount = 0; }, 1000);
@@ -128,6 +129,11 @@ wss.on('connection', (ws) => {
                 broadcastRoomUpdate(ws.roomId);
             }
 
+            else if (data.type === 'USER_STATUS') {
+                ws.isAway = !!data.away;
+                broadcastRoomUpdate(ws.roomId);
+            }
+
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 const room = rooms.get(ws.roomId);
                 room.nowPlaying    = (data.title || '').substring(0, 200);
@@ -159,7 +165,7 @@ function broadcastRoomUpdate(roomId) {
     if (!room) return;
     const users = Array.from(room.clients).map(c => ({
         id: c.id, username: c.username, color: c.color,
-        isHost: c.id === room.host, isInCall: c.isInCall || false
+        isHost: c.id === room.host, isInCall: c.isInCall || false, isAway: c.isAway || false
     }));
     broadcastToRoom(roomId, {
         type: 'ROOM_UPDATE', roomId,

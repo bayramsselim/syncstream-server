@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btnBack:      document.getElementById('btn-back'),
         btnLeave:     document.getElementById('btn-leave'),
         btnCopy:      document.getElementById('btn-copy'),
+        btnShare:     document.getElementById('btn-share'),
         connectingMsg:document.getElementById('connecting-msg'),
         dot1:         document.getElementById('status-dot'),
         dot2:         document.getElementById('status-dot-2')
@@ -134,6 +135,16 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     };
 
+    // ── Share Link ────────────────────────────────────────────────────────────
+    el.btnShare.onclick = () => {
+        const link = el.btnShare.dataset.link;
+        if (!link) return;
+        navigator.clipboard.writeText(link).then(() => {
+            el.btnShare.textContent = '✓ Link Kopyalandı';
+            setTimeout(() => { el.btnShare.textContent = 'Share Link'; }, 2000);
+        });
+    };
+
     // ── Host control toggle ───────────────────────────────────────────────────
     el.hostToggle.onchange = () => {
         chrome.runtime.sendMessage({ type: 'TOGGLE_HOST_CONTROL', value: el.hostToggle.checked });
@@ -148,6 +159,15 @@ document.addEventListener('DOMContentLoaded', () => {
         el.roomCodeDsp.textContent = room.roomId;
         el.npTitle.textContent = room.nowPlaying || 'Watching together...';
         el.npTitle.href = room.nowPlayingUrl || '#';
+
+        // Build shareable invite link from current tab URL
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            try {
+                const url = new URL(tabs[0]?.url || '');
+                url.searchParams.set('ss_room', room.roomId);
+                el.btnShare.dataset.link = url.toString();
+            } catch (_) { el.btnShare.dataset.link = ''; }
+        });
 
         el.userList.innerHTML = '';
         (room.users || []).forEach(u => {
