@@ -933,16 +933,42 @@ function injectUI() {
     makeDraggable(dock);
 
     // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
+    // Intercept requestFullscreen in the page context so body always becomes
+    // the fullscreen element — that way ss-root (child of body) stays visible.
+    try {
+        const fsIntercept = document.createElement('script');
+        fsIntercept.textContent = `(function(){
+            if(window.__ssFS)return; window.__ssFS=1;
+            function patch(orig){
+                return function(){
+                    if(!document.getElementById('ss-root')) return orig.apply(this,arguments);
+                    var b=document.body;
+                    return (b.requestFullscreen||b.webkitRequestFullscreen||b.mozRequestFullScreen||b.msRequestFullscreen).call(b);
+                };
+            }
+            ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function(k){
+                if(HTMLElement.prototype[k]) HTMLElement.prototype[k]=patch(HTMLElement.prototype[k]);
+            });
+        })();`;
+        (document.head || document.documentElement).appendChild(fsIntercept);
+        fsIntercept.remove();
+    } catch(_) {}
+
+    // Fallback: if intercept failed, move root into the fullscreen element
     function syncRootToFullscreen() {
         const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-        if (fsEl && !fsEl.contains(root)) {
-            // Ensure fullscreen container is a positioning context
-            const pos = getComputedStyle(fsEl).position;
-            if (pos === 'static') fsEl.style.position = 'relative';
-            fsEl.appendChild(root);
-        } else if (!fsEl && root.parentElement !== document.body) {
-            document.body.appendChild(root);
+        if (!fsEl) {
+            if (root.parentElement !== document.body) document.body.appendChild(root);
+            return;
         }
+        if (fsEl.contains(root)) return;
+        // Walk up past <video> tags — can't host DOM overlays inside <video>
+        let target = fsEl;
+        while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
+        const cs = getComputedStyle(target);
+        if (cs.position === 'static') target.style.position = 'relative';
+        target.style.overflow = 'visible';
+        target.appendChild(root);
     }
     document.addEventListener('fullscreenchange',       () => setTimeout(syncRootToFullscreen, 0));
     document.addEventListener('webkitfullscreenchange', () => setTimeout(syncRootToFullscreen, 0));
@@ -1122,17 +1148,19 @@ let loopInterval = null;
 function mainLoop() {
     if (IS_TOP_FRAME && !document.getElementById('ss-root')) injectUI();
 
-    // Keep root inside the active fullscreen element (fallback in case event missed)
+    // Fullscreen fallback: if event-based approach missed, correct placement now
     if (IS_TOP_FRAME) {
-        const root  = document.getElementById('ss-root');
-        const fsEl  = document.fullscreenElement || document.webkitFullscreenElement;
+        const root = document.getElementById('ss-root');
+        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
         if (root) {
-            if (fsEl && !fsEl.contains(root)) {
-                const pos = getComputedStyle(fsEl).position;
-                if (pos === 'static') fsEl.style.position = 'relative';
-                fsEl.appendChild(root);
-            } else if (!fsEl && root.parentElement !== document.body) {
+            if (!fsEl && root.parentElement !== document.body) {
                 document.body.appendChild(root);
+            } else if (fsEl && !fsEl.contains(root)) {
+                let target = fsEl;
+                while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
+                if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+                target.style.overflow = 'visible';
+                target.appendChild(root);
             }
         }
     }
