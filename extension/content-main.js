@@ -97,22 +97,17 @@
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
         }
 
-        /* ── L1: intercept requestFullscreen — handle <iframe> AND containers of iframes ── */
+        /* ── L1: intercept requestFullscreen for <iframe> elements only ──
+           (Wrapper divs are left to real fullscreen so YouTube etc. work.
+           hdfilmcehennemi-style wrappers are caught by L3 below if the iframe
+           is the dominant child.) */
         ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function (k) {
             var orig = HTMLElement.prototype[k];
             if (!orig) return;
             HTMLElement.prototype[k] = function () {
-                if (!isActive()) return orig.apply(this, arguments);
-                /* If this element IS an iframe — or CONTAINS an iframe (player wrapper) —
-                   CSS-fake-fs that iframe instead of real fullscreen. */
-                var inner = this.tagName === 'IFRAME' ? this : this.querySelector('iframe');
-                if (inner) {
-                    enterFake(inner);
-                    return Promise.resolve();
-                }
-                /* No iframe involved (e.g. YouTube's in-page player) — let real
-                   fullscreen happen; content.js's syncRootToFullscreen will move ss-root. */
-                return orig.apply(this, arguments);
+                if (!isActive() || this.tagName !== 'IFRAME') return orig.apply(this, arguments);
+                enterFake(this);
+                return Promise.resolve();
             };
         });
 
@@ -123,13 +118,25 @@
             else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
         });
 
-        /* ── L3: fullscreenchange fallback — abort real iframe-FS if it slips through ── */
+        /* ── L3: fullscreenchange fallback — abort real iframe-FS if it slips through.
+           Handles BOTH direct iframe-FS and wrapper-div-FS where the iframe is the
+           dominant child (covers >=70% of wrapper area). The dominance check prevents
+           breaking YouTube where the player div may contain small ad iframes. */
         document.addEventListener('fullscreenchange', function () {
             var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
             if (!fsEl || !isActive()) return;
-            /* If a real fullscreen request hit an iframe (or an element containing one)
-               despite our patch, undo it and use CSS fake-FS instead. */
-            var inner = fsEl.tagName === 'IFRAME' ? fsEl : fsEl.querySelector('iframe');
+            var inner = null;
+            if (fsEl.tagName === 'IFRAME') {
+                inner = fsEl;
+            } else {
+                var candidates = fsEl.querySelectorAll('iframe');
+                var fsRect = fsEl.getBoundingClientRect();
+                var fsArea = Math.max(1, fsRect.width * fsRect.height);
+                for (var i = 0; i < candidates.length; i++) {
+                    var r = candidates[i].getBoundingClientRect();
+                    if ((r.width * r.height) / fsArea >= 0.7) { inner = candidates[i]; break; }
+                }
+            }
             if (!inner) return;
             try { inner.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
             try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
