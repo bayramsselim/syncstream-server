@@ -505,11 +505,16 @@ function animateEmoji(emoji) {
 
 // ─── MESSAGE ROUTER ─────────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg) => {
-    switch (msg.type) {
-        case 'SYNC_STATE':
-            applyRemoteSync(msg);
-            break;
+    // SYNC is allowed in all frames
+    if (msg.type === 'SYNC_STATE') {
+        applyRemoteSync(msg);
+        return;
+    }
 
+    // EVERYTHING ELSE (WebRTC, UI, Chat) is TOP FRAME ONLY
+    if (!IS_TOP_FRAME) return;
+
+    switch (msg.type) {
         case 'CHAT_MESSAGE':
             addChatMessage(msg.username, msg.text, msg.color);
             break;
@@ -524,7 +529,6 @@ chrome.runtime.onMessage.addListener((msg) => {
                 initPeers();
                 if (roomState.isHost && videoElement) broadcastState();
             }
-            // Update in-page participant panel
             updateParticipantPanel();
             break;
 
@@ -533,7 +537,6 @@ chrome.runtime.onMessage.addListener((msg) => {
             break;
 
         case 'TOAST':
-            // Simple toast
             const t = document.createElement('div');
             t.textContent = msg.message;
             t.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.9);color:${msg.color||'#fff'};padding:10px 18px;border-radius:8px;font-size:13px;z-index:99999;pointer-events:none;`;
