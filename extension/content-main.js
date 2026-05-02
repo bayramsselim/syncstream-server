@@ -1,19 +1,18 @@
 /**
  * SyncStream Pro — Fullscreen intercept (MAIN world, document_start, all_frames)
  *
- * Problem: cross-origin iframes can go fullscreen via two paths:
- *   A) player INSIDE the iframe calls element.requestFullscreen()
- *   B) top-frame JS calls iframeElement.requestFullscreen()
+ * Real browser fullscreen of a cross-origin iframe (or an element containing one)
+ * hides ALL top-frame content including ss-root. Solution: CSS fake-fullscreen.
  *
- * Both paths cause real browser fullscreen which hides ss-root.
- * Solution: CSS fake-fullscreen (position:fixed on the iframe) — no Fullscreen
- * API needed, no user-activation requirement.
- *
- * Three layers of defense:
- *   1. Top frame: intercept requestFullscreen on <iframe> elements → CSS fake-FS
- *   2. Top frame: receive SS_FS_REQ from iframe → CSS fake-FS
- *   3. Top frame: fullscreenchange fallback — if real iframe-FS slips through, abort + CSS fake-FS
- *   Iframe: intercept requestFullscreen → send SS_FS_REQ → wait for SS_FS_ON
+ * Five layers of defense (top frame):
+ *   L1. Intercept HTMLElement.requestFullscreen — if target is, OR contains, an
+ *       <iframe>, do CSS fake-FS on that iframe. Otherwise pass through to real
+ *       fullscreen (so YouTube and other in-page players still work).
+ *   L2. Receive SS_FS_REQ message from iframe's own intercept.
+ *   L3. fullscreenchange fallback — if real iframe-FS slips through, abort.
+ *   L4. When entering fake-FS, force ss-root to be the last child of <body> and
+ *       set max z-index, so it always paints above the expanded iframe.
+ *   L5. Forward SS_FS_ON/OFF down the iframe tree (handles nested iframes).
  */
 (function () {
     if (window.__ssFS) return;
@@ -27,9 +26,9 @@
         var savedSt = null;
         var PROPS   = ['position','top','left','right','bottom','width','height',
                        'z-index','border','border-radius','transform','transition',
-                       'max-width','max-height'];
+                       'max-width','max-height','margin','clip','clip-path'];
 
-        function findFrame(source) {
+        function findFrameByWindow(source) {
             var iframes = document.querySelectorAll('iframe');
             for (var i = 0; i < iframes.length; i++) {
                 try { if (iframes[i].contentWindow === source) return iframes[i]; } catch (_) {}
@@ -41,6 +40,16 @@
                     big.offsetWidth  * big.offsetHeight) big = iframes[j];
             }
             return big;
+        }
+
+        function bumpSsRoot() {
+            var r = document.getElementById('ss-root');
+            if (!r) return;
+            if (r.parentElement !== document.body) document.body.appendChild(r);
+            else if (r !== document.body.lastElementChild) document.body.appendChild(r);
+            r.style.setProperty('z-index', '2147483647', 'important');
+            r.style.setProperty('position', 'fixed', 'important');
+            r.style.setProperty('inset',    '0',     'important');
         }
 
         function enterFake(fr) {
@@ -60,12 +69,16 @@
             fr.style.setProperty('height',        '100vh',      'important');
             fr.style.setProperty('max-width',     'none',       'important');
             fr.style.setProperty('max-height',    'none',       'important');
+            fr.style.setProperty('margin',        '0',          'important');
             fr.style.setProperty('z-index',       '2147483646', 'important');
             fr.style.setProperty('border',        'none',       'important');
             fr.style.setProperty('border-radius', '0',          'important');
             fr.style.setProperty('transform',     'none',       'important');
             fr.style.setProperty('transition',    'none',       'important');
+            fr.style.setProperty('clip',          'auto',       'important');
+            fr.style.setProperty('clip-path',     'none',       'important');
             fr.setAttribute('data-ss-fs', '1');
+            bumpSsRoot();
             try { fr.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
         }
 
@@ -84,37 +97,46 @@
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
         }
 
-        /* ── Layer 1: intercept requestFullscreen in top frame for <iframe> elements ── */
+        /* ── L1: intercept requestFullscreen — handle <iframe> AND containers of iframes ── */
         ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function (k) {
             var orig = HTMLElement.prototype[k];
             if (!orig) return;
             HTMLElement.prototype[k] = function () {
-                if (!isActive() || this.tagName !== 'IFRAME') return orig.apply(this, arguments);
-                enterFake(this);
-                return Promise.resolve();
+                if (!isActive()) return orig.apply(this, arguments);
+                /* If this element IS an iframe — or CONTAINS an iframe (player wrapper) —
+                   CSS-fake-fs that iframe instead of real fullscreen. */
+                var inner = this.tagName === 'IFRAME' ? this : this.querySelector('iframe');
+                if (inner) {
+                    enterFake(inner);
+                    return Promise.resolve();
+                }
+                /* No iframe involved (e.g. YouTube's in-page player) — let real
+                   fullscreen happen; content.js's syncRootToFullscreen will move ss-root. */
+                return orig.apply(this, arguments);
             };
         });
 
-        /* ── Layer 2: receive SS_FS_REQ from iframe's own intercept ── */
+        /* ── L2: receive SS_FS_REQ from iframe's intercept ── */
         window.addEventListener('message', function (e) {
             if (!e.data || !isActive()) return;
-            if      (e.data.type === 'SS_FS_REQ')  { var fr = findFrame(e.source); if (fr) enterFake(fr); }
+            if      (e.data.type === 'SS_FS_REQ')  { var fr = findFrameByWindow(e.source); if (fr) enterFake(fr); }
             else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
         });
 
-        /* ── Layer 3: fullscreenchange fallback — abort real iframe-FS ── */
+        /* ── L3: fullscreenchange fallback — abort real iframe-FS if it slips through ── */
         document.addEventListener('fullscreenchange', function () {
             var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-            if (!fsEl || fsEl.tagName !== 'IFRAME' || !isActive()) return;
-            /* Real browser fullscreen with an iframe slipped through.
-               Notify iframe FIRST (so faked fullscreenElement is true before
-               the exit-fullscreenchange fires inside it), then abort. */
-            try { fsEl.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
+            if (!fsEl || !isActive()) return;
+            /* If a real fullscreen request hit an iframe (or an element containing one)
+               despite our patch, undo it and use CSS fake-FS instead. */
+            var inner = fsEl.tagName === 'IFRAME' ? fsEl : fsEl.querySelector('iframe');
+            if (!inner) return;
+            try { inner.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
             try { (document.exitFullscreen || document.webkitExitFullscreen).call(document); } catch (_) {}
-            enterFake(fsEl);
+            enterFake(inner);
         });
 
-        /* Escape key exits fake-FS from top frame */
+        /* Escape exits fake-FS from top frame */
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape' && fakeEl) exitFake();
         });
@@ -126,26 +148,37 @@
     var fsOn           = false;
     var pendingResolve = null;
 
+    function broadcastDown(msg) {
+        document.querySelectorAll('iframe').forEach(function (fr) {
+            try { fr.contentWindow.postMessage(msg, '*'); } catch (_) {}
+        });
+    }
+
     window.addEventListener('message', function (e) {
         if (!e.data) return;
-        if (e.data.type === 'SS_FS_ON' && !fsOn) {
-            fsOn = true;
-            if (pendingResolve) { pendingResolve(); pendingResolve = null; }
-            try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
-            try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
-        } else if (e.data.type === 'SS_FS_OFF' && fsOn) {
-            fsOn = false;
-            try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
-            try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
+        if (e.data.type === 'SS_FS_ON') {
+            broadcastDown(e.data);  /* L5: forward to nested iframes */
+            if (!fsOn) {
+                fsOn = true;
+                if (pendingResolve) { pendingResolve(); pendingResolve = null; }
+                try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
+                try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
+            }
+        } else if (e.data.type === 'SS_FS_OFF') {
+            broadcastDown(e.data);
+            if (fsOn) {
+                fsOn = false;
+                try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
+                try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
+            }
         }
     });
 
-    /* Escape inside iframe */
     document.addEventListener('keydown', function (e) {
         if (e.key === 'Escape' && fsOn) fakeExit();
     });
 
-    /* 1. Fake document.fullscreenElement */
+    /* Fake document.fullscreenElement */
     ['fullscreenElement', 'webkitFullscreenElement', 'mozFullScreenElement'].forEach(function (prop) {
         var d = Object.getOwnPropertyDescriptor(Document.prototype, prop) ||
                 Object.getOwnPropertyDescriptor(document, prop);
@@ -159,7 +192,15 @@
         } catch (_) {}
     });
 
-    /* 2. Fake exitFullscreen */
+    /* Fake document.fullscreenEnabled — some players gate on it */
+    try {
+        Object.defineProperty(document, 'fullscreenEnabled', { get: function () { return true; }, configurable: true });
+    } catch (_) {}
+    try {
+        Object.defineProperty(document, 'webkitFullscreenEnabled', { get: function () { return true; }, configurable: true });
+    } catch (_) {}
+
+    /* Fake exitFullscreen — proxy to top frame */
     var origExit = Document.prototype.exitFullscreen || Document.prototype.webkitExitFullscreen;
     var fakeExit = function () {
         if (fsOn) {
@@ -172,7 +213,7 @@
     try { Object.defineProperty(document, 'webkitExitFullscreen', { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
     try { Object.defineProperty(document, 'mozCancelFullScreen',  { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
 
-    /* 3. Intercept requestFullscreen */
+    /* Intercept requestFullscreen */
     function patchMethod(k) {
         var orig = HTMLElement.prototype[k];
         if (!orig) return;
@@ -190,7 +231,7 @@
     }
     ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(patchMethod);
 
-    /* 4. webkitEnterFullscreen on video elements */
+    /* webkitEnterFullscreen on video elements */
     var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
     if (origWEFS) {
         HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
