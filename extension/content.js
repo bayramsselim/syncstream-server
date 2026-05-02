@@ -596,8 +596,8 @@ function showReconnectToast(sec) {
     if (!t) {
         t = document.createElement('div');
         t.id = 'ss-reconnect-toast';
-        t.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(239,68,68,0.95);color:#fff;padding:10px 22px;border-radius:20px;font-size:12px;font-weight:600;z-index:2147483646;pointer-events:none;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.15);box-shadow:0 4px 24px rgba(0,0,0,0.5);white-space:nowrap;';
-        document.body.appendChild(t);
+        t.style.cssText = 'position:absolute;top:16px;left:50%;transform:translateX(-50%);background:rgba(239,68,68,0.95);color:#fff;padding:10px 22px;border-radius:20px;font-size:12px;font-weight:600;z-index:2147483646;pointer-events:none;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.15);box-shadow:0 4px 24px rgba(0,0,0,0.5);white-space:nowrap;';
+        (document.getElementById('ss-root') || document.body).appendChild(t);
     }
     let s = sec;
     clearInterval(t._timer);
@@ -612,7 +612,7 @@ function showJoinPrompt(code) {
 
     const box = document.createElement('div');
     box.id = 'ss-join-prompt';
-    box.style.cssText = 'position:fixed;top:20px;right:20px;background:rgba(6,6,14,0.97);border:1px solid rgba(99,102,241,0.3);border-radius:16px;padding:20px;width:280px;z-index:2147483646;box-shadow:0 12px 40px rgba(0,0,0,0.7);pointer-events:auto;font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif;display:flex;flex-direction:column;gap:12px;';
+    box.style.cssText = 'position:absolute;top:20px;right:20px;background:rgba(6,6,14,0.97);border:1px solid rgba(99,102,241,0.3);border-radius:16px;padding:20px;width:280px;z-index:2147483646;box-shadow:0 12px 40px rgba(0,0,0,0.7);pointer-events:auto;font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif;display:flex;flex-direction:column;gap:12px;';
 
     const ttl = document.createElement('div');
     ttl.style.cssText = 'font-size:13px;font-weight:700;color:#fff;';
@@ -655,7 +655,7 @@ function showJoinPrompt(code) {
 
     row.appendChild(noBtn); row.appendChild(joinBtn);
     box.appendChild(ttl); box.appendChild(sub); box.appendChild(inp); box.appendChild(row);
-    document.body.appendChild(box);
+    (document.getElementById('ss-root') || document.body).appendChild(box);
 
     chrome.storage.local.get(['savedUsername'], (res) => {
         if (res.savedUsername) inp.value = res.savedUsername;
@@ -672,7 +672,7 @@ function showNavigateToast(url, title, username) {
 
     t = document.createElement('div');
     t.id = 'ss-nav-toast';
-    t.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(6,6,14,0.97);color:#fff;padding:14px 18px;border-radius:16px;font-size:13px;z-index:2147483646;border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.65);display:flex;flex-direction:column;gap:10px;min-width:300px;max-width:420px;pointer-events:auto;';
+    t.style.cssText = 'position:absolute;top:20px;left:50%;transform:translateX(-50%);background:rgba(6,6,14,0.97);color:#fff;padding:14px 18px;border-radius:16px;font-size:13px;z-index:2147483646;border:1px solid rgba(255,255,255,0.1);box-shadow:0 8px 32px rgba(0,0,0,0.65);display:flex;flex-direction:column;gap:10px;min-width:300px;max-width:420px;pointer-events:auto;';
 
     const top = document.createElement('div');
     top.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px;color:#aaa;';
@@ -706,7 +706,7 @@ function showNavigateToast(url, title, username) {
     t.appendChild(top);
     t.appendChild(titleEl);
     t.appendChild(bottom);
-    document.body.appendChild(t);
+    (document.getElementById('ss-root') || document.body).appendChild(t);
 
     let s = 5;
     const update = () => { countdown.textContent = `Auto-navigating in ${s}s`; };
@@ -777,8 +777,8 @@ function addChatMessage(user, text, color) {
 function animateEmoji(emoji) {
     const e = document.createElement('div');
     e.textContent = emoji;
-    e.style.cssText = `position:fixed;bottom:100px;left:${38+Math.random()*24}%;font-size:44px;z-index:999999;pointer-events:none;transition:transform 1.8s cubic-bezier(0.2,0.8,0.4,1),opacity 1.8s ease;opacity:1;`;
-    document.body.appendChild(e);
+    e.style.cssText = `position:absolute;bottom:100px;left:${38+Math.random()*24}%;font-size:44px;z-index:999999;pointer-events:none;transition:transform 1.8s cubic-bezier(0.2,0.8,0.4,1),opacity 1.8s ease;opacity:1;`;
+    (document.getElementById('ss-root') || document.body).appendChild(e);
     requestAnimationFrame(() => requestAnimationFrame(() => {
         e.style.transform = `translateY(-380px) rotate(${(Math.random()-.5)*30}deg) scale(1.4)`;
         e.style.opacity   = '0';
@@ -789,8 +789,8 @@ function animateEmoji(emoji) {
 function showToast(text, color) {
     const t = document.createElement('div');
     t.textContent = text;
-    t.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-10px);background:rgba(10,10,20,0.95);color:${color||'#fff'};padding:8px 18px;border-radius:20px;z-index:999999;font-size:12px;font-weight:600;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.1);box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none;transition:transform 0.3s ease,opacity 0.3s ease;opacity:0;`;
-    document.body.appendChild(t);
+    t.style.cssText = `position:absolute;top:16px;left:50%;transform:translateX(-50%) translateY(-10px);background:rgba(10,10,20,0.95);color:${color||'#fff'};padding:8px 18px;border-radius:20px;z-index:999999;font-size:12px;font-weight:600;letter-spacing:0.04em;border:1px solid rgba(255,255,255,0.1);box-shadow:0 4px 20px rgba(0,0,0,0.5);pointer-events:none;transition:transform 0.3s ease,opacity 0.3s ease;opacity:0;`;
+    (document.getElementById('ss-root') || document.body).appendChild(t);
     requestAnimationFrame(() => requestAnimationFrame(() => { t.style.transform = 'translateX(-50%) translateY(0)'; t.style.opacity = '1'; }));
     setTimeout(() => { t.style.opacity = '0'; t.style.transform = 'translateX(-50%) translateY(-10px)'; }, 2700);
     setTimeout(() => t.remove(), 3100);
@@ -873,7 +873,7 @@ function injectUI() {
     // ── DOCK ─────────────────────────────────────────────────────────────────
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
+    dock.style.cssText = 'position:absolute;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
 
     const mkBtn = (emoji, id, handler, tip) => {
         const b = document.createElement('button');
@@ -973,13 +973,13 @@ function injectUI() {
     // ── SYNC INDICATOR ────────────────────────────────────────────────────────
     const syncInd = document.createElement('div');
     syncInd.id = 'ss-sync-ind';
-    syncInd.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.95);color:#fff;padding:10px 24px;border-radius:24px;font-size:16px;font-weight:700;z-index:2147483645;pointer-events:none;opacity:0;transition:opacity 0.3s ease,transform 0.3s ease;letter-spacing:0.05em;box-shadow:0 4px 24px rgba(99,102,241,0.45);white-space:nowrap;';
+    syncInd.style.cssText = 'position:absolute;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.95);color:#fff;padding:10px 24px;border-radius:24px;font-size:16px;font-weight:700;z-index:2147483645;pointer-events:none;opacity:0;transition:opacity 0.3s ease,transform 0.3s ease;letter-spacing:0.05em;box-shadow:0 4px 24px rgba(99,102,241,0.45);white-space:nowrap;';
     root.appendChild(syncInd);
 
     // ── CHAT PANEL ────────────────────────────────────────────────────────────
     const chatPanel = document.createElement('div');
     chatPanel.id = 'ss-chat';
-    chatPanel.style.cssText = 'position:fixed;bottom:90px;right:24px;width:290px;height:360px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 12px 40px rgba(0,0,0,0.65);overflow:hidden;';
+    chatPanel.style.cssText = 'position:absolute;bottom:90px;right:24px;width:290px;height:360px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 12px 40px rgba(0,0,0,0.65);overflow:hidden;';
     root.appendChild(chatPanel);
     makeDraggable(chatPanel);
 
@@ -1033,14 +1033,14 @@ function injectUI() {
     // ── PARTICIPANTS PANEL ────────────────────────────────────────────────────
     const pP = document.createElement('div');
     pP.id = 'ss-participants';
-    pP.style.cssText = 'position:fixed;bottom:90px;left:24px;width:210px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;padding:14px;display:none;color:#fff;pointer-events:auto;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
+    pP.style.cssText = 'position:absolute;bottom:90px;left:24px;width:210px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;padding:14px;display:none;color:#fff;pointer-events:auto;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
     root.appendChild(pP);
     makeDraggable(pP);
 
     // ── VIDEO GALLERY ─────────────────────────────────────────────────────────
     const gallery = document.createElement('div');
     gallery.id = 'ss-gallery';
-    gallery.style.cssText = 'position:fixed;top:20px;right:20px;background:rgba(6,6,14,0.92);border:1px solid rgba(255,255,255,0.1);border-radius:14px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);overflow:hidden;z-index:2147483640;transition:width 0.3s,height 0.3s;min-width:80px;';
+    gallery.style.cssText = 'position:absolute;top:20px;right:20px;background:rgba(6,6,14,0.92);border:1px solid rgba(255,255,255,0.1);border-radius:14px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);overflow:hidden;z-index:2147483640;transition:width 0.3s,height 0.3s;min-width:80px;';
 
     const galleryHeader = document.createElement('div');
     galleryHeader.style.cssText = 'height:34px;padding:0 10px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;cursor:grab;user-select:none;';
@@ -1105,7 +1105,7 @@ function injectUI() {
 
     // ── KEYBOARD SHORTCUT TOOLTIP ─────────────────────────────────────────────
     const kbHint = document.createElement('div');
-    kbHint.style.cssText = 'position:fixed;bottom:8px;left:50%;transform:translateX(-50%);font-size:10px;color:rgba(255,255,255,0.2);pointer-events:none;white-space:nowrap;';
+    kbHint.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:10px;color:rgba(255,255,255,0.2);pointer-events:none;white-space:nowrap;';
     kbHint.textContent = 'Alt+M mic · Alt+C cam · Alt+S screen · Alt+T chat · Alt+P people';
     root.appendChild(kbHint);
 }
