@@ -860,6 +860,9 @@ function injectUI() {
     root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;font-family:-apple-system,BlinkMacSystemFont,"Inter",sans-serif;';
     document.body.appendChild(root);
 
+    // Signal content-main.js (MAIN world) that SyncStream is active
+    document.documentElement.setAttribute('data-ss-active', '1');
+
     const style = document.createElement('style');
     style.textContent = `
         @keyframes ss-fadein { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:none; } }
@@ -867,6 +870,12 @@ function injectUI() {
         #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(-50%) translateY(14px) !important; pointer-events:none !important; }
         #ss-msgs::-webkit-scrollbar { width:3px; }
         #ss-msgs::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:4px; }
+        body:fullscreen iframe[data-ss-fs],
+        body:-webkit-full-screen iframe[data-ss-fs] {
+            position:fixed!important;inset:0!important;
+            width:100vw!important;height:100vh!important;
+            z-index:1!important;border:none!important;
+        }
     `;
     document.head.appendChild(style);
 
@@ -933,28 +942,9 @@ function injectUI() {
     makeDraggable(dock);
 
     // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
-    // Intercept requestFullscreen in the page context so body always becomes
-    // the fullscreen element — that way ss-root (child of body) stays visible.
-    try {
-        const fsIntercept = document.createElement('script');
-        fsIntercept.textContent = `(function(){
-            if(window.__ssFS)return; window.__ssFS=1;
-            function patch(orig){
-                return function(){
-                    if(!document.getElementById('ss-root')) return orig.apply(this,arguments);
-                    var b=document.body;
-                    return (b.requestFullscreen||b.webkitRequestFullscreen||b.mozRequestFullScreen||b.msRequestFullscreen).call(b);
-                };
-            }
-            ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(function(k){
-                if(HTMLElement.prototype[k]) HTMLElement.prototype[k]=patch(HTMLElement.prototype[k]);
-            });
-        })();`;
-        (document.head || document.documentElement).appendChild(fsIntercept);
-        fsIntercept.remove();
-    } catch(_) {}
-
-    // Fallback: if intercept failed, move root into the fullscreen element
+    // content-main.js (MAIN world, document_start) intercepts requestFullscreen
+    // and redirects it to document.body — so ss-root (child of body) stays visible.
+    // This fallback handles the rare case where body isn't the fullscreen element.
     function syncRootToFullscreen() {
         const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
         if (!fsEl) {
@@ -962,11 +952,9 @@ function injectUI() {
             return;
         }
         if (fsEl.contains(root)) return;
-        // Walk up past <video> tags — can't host DOM overlays inside <video>
         let target = fsEl;
         while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
-        const cs = getComputedStyle(target);
-        if (cs.position === 'static') target.style.position = 'relative';
+        if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
         target.style.overflow = 'visible';
         target.appendChild(root);
     }
