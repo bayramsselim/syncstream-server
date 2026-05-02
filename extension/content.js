@@ -95,6 +95,14 @@ function broadcastState(event = 'sync') {
 function applyRemoteSync(msg) {
     if (!videoElement) return;
     isSyncing = true;
+    
+    // Remove sync overlay when first signal received
+    const overlay = document.getElementById('ss-sync-overlay');
+    if (overlay) {
+        overlay.style.opacity = '0';
+        setTimeout(() => overlay.remove(), 500);
+    }
+
     const diff = Math.abs(videoElement.currentTime - msg.time);
     if (msg.event === 'seek' || diff > 2) videoElement.currentTime = msg.time;
     if (msg.event === 'play')  videoElement.play().catch(() => {});
@@ -395,33 +403,81 @@ function injectUI() {
 
     const root = document.createElement('div');
     root.id = 'ss-root';
-    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483640;font-family:system-ui,sans-serif;';
+    root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483640;font-family:"Inter",sans-serif;';
     document.body.appendChild(root);
+
+    // CSS for animations and stars
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes ss-star-float {
+            from { transform: translateY(0); }
+            to { transform: translateY(-100vh); }
+        }
+        @keyframes ss-glow {
+            0%, 100% { box-shadow: 0 0 5px rgba(99,102,241,0.2); }
+            50% { box-shadow: 0 0 15px rgba(99,102,241,0.5); }
+        }
+        .ss-star {
+            position: absolute; background: white; border-radius: 50%; opacity: 0.5;
+            animation: ss-star-float linear infinite;
+        }
+        .ss-glass {
+            background: rgba(0, 0, 0, 0.75) !important;
+            backdrop-filter: blur(20px) saturate(180%) !important;
+            border: 1px solid rgba(255, 255, 255, 0.08) !important;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8) !important;
+        }
+    `;
+    document.head.appendChild(style);
+
+    // Star Background
+    const stars = document.createElement('div');
+    stars.style.cssText = 'position:fixed;inset:0;overflow:hidden;pointer-events:none;z-index:-1;';
+    for(let i=0; i<50; i++) {
+        const s = document.createElement('div');
+        s.className = 'ss-star';
+        const size = Math.random() * 2 + 1;
+        s.style.width = size + 'px';
+        s.style.height = size + 'px';
+        s.style.left = Math.random() * 100 + 'vw';
+        s.style.top = Math.random() * 100 + 'vh';
+        s.style.animationDuration = (Math.random() * 10 + 20) + 's';
+        stars.appendChild(s);
+    }
+    root.appendChild(stars);
 
     // Dock
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);background:rgba(10,10,20,0.88);backdrop-filter:blur(12px);padding:10px 18px;border-radius:40px;border:1px solid rgba(255,255,255,0.12);display:flex;gap:12px;align-items:center;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.5);z-index:2147483647;';
+    dock.className = 'ss-glass';
+    dock.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);padding:8px 16px;border-radius:24px;display:flex;gap:10px;align-items:center;pointer-events:auto;z-index:2147483647;transition:all 0.3s cubic-bezier(0.4, 0, 0.2, 1);';
 
-    const mkBtn = (emoji, id, handler) => {
+    // Now Playing Bar (Subtle)
+    const np = document.createElement('div');
+    np.id = 'ss-now-playing';
+    np.style.cssText = 'margin-right:12px;padding-right:12px;border-right:1px solid rgba(255,255,255,0.1);max-width:200px;';
+    np.innerHTML = `
+        <div style="font-size:9px;color:#818cf8;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;">Now Playing</div>
+        <div id="ss-np-title" style="font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Searching...</div>
+    `;
+    dock.appendChild(np);
+
+    const mkBtn = (emoji, id, handler, tip) => {
         const b = document.createElement('button');
-        b.id = id; b.textContent = emoji;
-        b.style.cssText = 'background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);color:#fff;width:40px;height:40px;border-radius:50%;cursor:pointer;font-size:17px;display:flex;align-items:center;justify-content:center;transition:background 0.2s;outline:none;';
-        // CRITICAL: stopPropagation prevents YouTube from catching the click
+        b.id = id; b.innerHTML = emoji;
+        b.title = tip;
+        b.style.cssText = 'background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.05);color:#fff;width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;transition:all 0.2s;outline:none;';
+        b.addEventListener('mouseenter', () => b.style.background = 'rgba(255,255,255,0.15)');
+        b.addEventListener('mouseleave', () => updateButtons());
         b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); handler(); }, true);
         return b;
     };
 
-    dock.appendChild(mkBtn('💬', 'ss-b-chat',  () => { isChatOpen = !isChatOpen;  document.getElementById('ss-chat').style.display = isChatOpen ? 'flex' : 'none'; updateButtons(); }));
-    dock.appendChild(mkBtn('🎤', 'ss-b-mic',   () => { isMicOn = !isMicOn;  updateMedia(); }));
-    dock.appendChild(mkBtn('📷', 'ss-b-cam',   () => { isCamOn = !isCamOn;  updateMedia(); }));
-    dock.appendChild(mkBtn('😊', 'ss-b-emoji', () => { isEmojiOpen = !isEmojiOpen; document.getElementById('ss-emoji').style.display = isEmojiOpen ? 'flex' : 'none'; updateButtons(); }));
-    dock.appendChild(mkBtn('👥', 'ss-b-people', () => { const pp = document.getElementById('ss-participants'); if(pp) pp.style.display = pp.style.display === 'none' ? 'block' : 'none'; }));
-    // Keyboard shortcut hint
-    const hint = document.createElement('div');
-    hint.style.cssText = 'font-size:9px;color:rgba(255,255,255,0.25);white-space:nowrap;';
-    hint.textContent = 'Alt+M/C/E/T/P';
-    dock.appendChild(hint);
+    dock.appendChild(mkBtn('💬', 'ss-b-chat',  () => { isChatOpen = !isChatOpen;  document.getElementById('ss-chat').style.display = isChatOpen ? 'flex' : 'none'; updateButtons(); }, 'Chat (Alt+T)'));
+    dock.appendChild(mkBtn('🎤', 'ss-b-mic',   () => { isMicOn = !isMicOn;  updateMedia(); }, 'Mic (Alt+M)'));
+    dock.appendChild(mkBtn('📷', 'ss-b-cam',   () => { isCamOn = !isCamOn;  updateMedia(); }, 'Camera (Alt+C)'));
+    dock.appendChild(mkBtn('😊', 'ss-b-emoji', () => { isEmojiOpen = !isEmojiOpen; document.getElementById('ss-emoji').style.display = isEmojiOpen ? 'flex' : 'none'; updateButtons(); }, 'Emoji (Alt+E)'));
+    dock.appendChild(mkBtn('👥', 'ss-b-people', () => { const pp = document.getElementById('ss-participants'); if(pp) pp.style.display = pp.style.display === 'none' ? 'block' : 'none'; }, 'People (Alt+P)'));
     root.appendChild(dock);
 
     // Video grid
@@ -430,26 +486,27 @@ function injectUI() {
     grid.style.cssText = 'position:fixed;top:16px;right:16px;display:flex;flex-direction:column;gap:12px;align-items:flex-end;pointer-events:none;';
     root.appendChild(grid);
 
-    // Participants panel (Alt+P or 👥 button)
+    // Participants panel
     const pPanel = document.createElement('div');
     pPanel.id = 'ss-participants';
-    pPanel.style.cssText = 'position:fixed;bottom:90px;left:24px;width:180px;background:rgba(10,10,20,0.9);backdrop-filter:blur(12px);border-radius:10px;border:1px solid rgba(255,255,255,0.1);padding:10px;pointer-events:auto;display:none;';
-    pPanel.innerHTML = '<div style="font-size:11px;color:#818cf8;">No participants yet</div>';
+    pPanel.className = 'ss-glass';
+    pPanel.style.cssText = 'position:fixed;bottom:90px;left:24px;width:200px;border-radius:16px;padding:12px;pointer-events:auto;display:none;';
     root.appendChild(pPanel);
 
     // Chat
     const chat = document.createElement('div');
     chat.id = 'ss-chat';
-    chat.style.cssText = 'position:fixed;bottom:90px;right:24px;width:290px;height:380px;background:rgba(10,10,20,0.95);backdrop-filter:blur(16px);border-radius:12px;border:1px solid rgba(255,255,255,0.1);display:none;flex-direction:column;pointer-events:auto;';
+    chat.className = 'ss-glass';
+    chat.style.cssText = 'position:fixed;bottom:90px;right:24px;width:300px;height:400px;border-radius:16px;display:none;flex-direction:column;pointer-events:auto;';
     chat.innerHTML = `
-        <div style="padding:10px 12px;background:rgba(255,255,255,0.04);color:#fff;font-weight:600;font-size:13px;display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.06);">
-            <span>Chat</span>
-            <button id="ss-chat-x" style="background:none;border:none;color:#aaa;cursor:pointer;font-size:16px;line-height:1;">✕</button>
+        <div style="padding:12px 16px;color:#fff;font-weight:700;font-size:12px;display:flex;justify-content:space-between;align-items:center;">
+            <span style="letter-spacing:0.05em;">COSMIC CHAT</span>
+            <button id="ss-chat-x" style="background:none;border:none;color:#555;cursor:pointer;font-size:14px;">✕</button>
         </div>
-        <div id="ss-msgs" style="flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px;"></div>
-        <div style="padding:8px;display:flex;gap:6px;border-top:1px solid rgba(255,255,255,0.06);">
-            <input id="ss-chat-in" placeholder="Message…" style="flex:1;background:rgba(255,255,255,0.06);border:none;color:#fff;padding:7px 10px;border-radius:6px;font-size:12px;outline:none;">
-            <button id="ss-chat-send" style="background:#6366f1;border:none;color:#fff;padding:7px 12px;border-radius:6px;cursor:pointer;font-size:12px;">Send</button>
+        <div id="ss-msgs" style="flex:1;overflow-y:auto;padding:0 16px;display:flex;flex-direction:column;gap:8px;"></div>
+        <div style="padding:16px;display:flex;gap:8px;">
+            <input id="ss-chat-in" placeholder="Message to nebula..." style="flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.05);color:#fff;padding:10px 14px;border-radius:12px;font-size:12px;outline:none;">
+            <button id="ss-chat-send" style="background:#6366f1;border:none;color:#fff;width:36px;height:36px;border-radius:50%;cursor:pointer;font-size:14px;box-shadow:0 0 15px rgba(99,102,241,0.3);">></button>
         </div>`;
     root.appendChild(chat);
 
@@ -464,17 +521,49 @@ function injectUI() {
     // Emoji bar
     const emojiBar = document.createElement('div');
     emojiBar.id = 'ss-emoji';
-    emojiBar.style.cssText = 'position:fixed;bottom:85px;left:50%;transform:translateX(-50%);display:none;gap:8px;background:rgba(10,10,20,0.88);backdrop-filter:blur(12px);padding:8px 14px;border-radius:30px;border:1px solid rgba(255,255,255,0.1);pointer-events:auto;';
+    emojiBar.className = 'ss-glass';
+    emojiBar.style.cssText = 'position:fixed;bottom:85px;left:50%;transform:translateX(-50%);display:none;gap:12px;padding:10px 20px;border-radius:30px;pointer-events:auto;';
     ['😂','❤️','😮','👏','😡'].forEach(em => {
         const b = document.createElement('button');
         b.textContent = em;
-        b.style.cssText = 'background:none;border:none;font-size:20px;cursor:pointer;line-height:1;';
+        b.style.cssText = 'background:none;border:none;font-size:24px;cursor:pointer;line-height:1;transition:transform 0.2s;';
+        b.onmouseenter = () => b.style.transform = 'scale(1.3)';
+        b.onmouseleave = () => b.style.transform = 'scale(1)';
         b.onclick = (e) => { e.stopPropagation(); chrome.runtime.sendMessage({ type: 'REACTION', emoji: em }); };
         emojiBar.appendChild(b);
     });
     root.appendChild(emojiBar);
 
+    // Initial Sync Overlay
+    const syncOverlay = document.createElement('div');
+    syncOverlay.id = 'ss-sync-overlay';
+    syncOverlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.95);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2147483648;color:#fff;pointer-events:auto;transition:opacity 0.5s;';
+    syncOverlay.innerHTML = `
+        <div style="width:40px;height:40px;border:3px solid #6366f1;border-top-color:transparent;border-radius:50%;animation:ss-star-float 1s linear infinite;"></div>
+        <div style="margin-top:20px;font-weight:600;letter-spacing:0.1em;font-size:14px;">SYNCING WITH NEBULA</div>
+        <div style="margin-top:8px;font-size:11px;color:#666;">Waiting for master signal...</div>
+    `;
+    root.appendChild(syncOverlay);
+
     updateButtons();
+}
+
+function updateButtons() {
+    const activeColor = '#6366f1';
+    const idleColor   = 'rgba(255,255,255,0.05)';
+    
+    const setStyle = (id, active) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.style.background = active ? activeColor : idleColor;
+            el.style.animation = active ? 'ss-glow 2s infinite' : 'none';
+        }
+    };
+    
+    setStyle('ss-b-chat',  isChatOpen);
+    setStyle('ss-b-emoji', isEmojiOpen);
+    setStyle('ss-b-mic',   isMicOn);
+    setStyle('ss-b-cam',   isCamOn);
 }
 
 function updateButtons() {
@@ -553,6 +642,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 // ─── MAIN LOOP (1s) ─────────────────────────────────────────────────────────────
+let lastTitle = '';
 setInterval(() => {
     // Only inject UI in the Master frame (prevents double dock)
     if (canShowUI && !document.getElementById('ss-root')) injectUI();
@@ -564,6 +654,25 @@ setInterval(() => {
         if (videoElement) { console.log('[SyncStream] Video attached in', location.hostname); attachSyncListeners(); }
     }
 
+    // Update Now Playing Title
+    if (canShowUI) {
+        let title = document.title;
+        if (location.hostname.includes('youtube')) {
+            const yt = document.querySelector('h1.ytd-video-primary-info-renderer');
+            if (yt) title = yt.innerText;
+        } else if (location.hostname.includes('dizigom')) {
+            const dz = document.querySelector('.section-title h1');
+            if (dz) title = dz.innerText;
+        }
+        
+        if (title !== lastTitle) {
+            lastTitle = title;
+            chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title: title });
+            const np = document.getElementById('ss-np-title');
+            if (np) np.textContent = title;
+        }
+    }
+
     // Keep remote conference videos alive (Master frame only)
     if (canShowUI) {
         document.querySelectorAll('video[id^="ss-v-"]').forEach(v => {
@@ -572,6 +681,7 @@ setInterval(() => {
             }
         });
     }
+}, 1000);
 }, 1000);
 
 // ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
