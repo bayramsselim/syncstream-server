@@ -46,6 +46,8 @@ const ICE_SERVERS  = {
 chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
     if (res?.myId) {
         roomState = res;
+        // Signal content-main.js (MAIN world) in THIS frame — works in iframes too
+        document.documentElement.setAttribute('data-ss-active', '1');
         if (IS_TOP_FRAME) {
             injectUI();
             syncAvatarTiles(res.users || []);
@@ -69,6 +71,14 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
 
 chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'SYNC_STATE') { applyRemoteSync(msg); return; }
+
+    // Keep data-ss-active in sync in ALL frames (needed by content-main.js intercept)
+    if (msg.type === 'ROOM_STATE' && msg.data?.roomId) {
+        document.documentElement.setAttribute('data-ss-active', '1');
+    } else if (msg.type === 'ROOM_STATE' && !msg.data?.roomId) {
+        document.documentElement.removeAttribute('data-ss-active');
+    }
+
     if (!IS_TOP_FRAME) return;
 
     if      (msg.type === 'ROOM_STATE')    {
