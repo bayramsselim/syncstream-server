@@ -265,7 +265,7 @@ async function toggleScreenShare() {
             addVideoTile('local', screenStream, '🖥 Screen');
 
             // Auto-stop when browser chrome "Stop sharing" is clicked
-            screenTrack.onended = () => { isScreenSharing = false; toggleScreenShare(); };
+            screenTrack.onended = () => toggleScreenShare();
         } catch (e) {
             console.error('[SS] Screen share:', e);
             isScreenSharing = false;
@@ -326,7 +326,7 @@ function updateGalleryLayout() {
     if (showAllBtn) showAllBtn.style.display = hiddenCount > 0 ? 'inline-block' : 'none';
 
     if (allTiles.length === 0) { gallery.style.display = 'none'; return; }
-    gallery.style.display = 'flex';
+    if (!gallery.classList.contains('ss-user-hidden')) gallery.style.display = 'flex';
 
     if (count === 0) {
         // All hidden — show just the header
@@ -836,7 +836,7 @@ document.addEventListener('keydown', (e) => {
             if (chat) { chat.style.display = isChatOpen ? 'flex' : 'none'; if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); } }
             updateButtons();
         },
-        'p': () => { const g = document.getElementById('ss-gallery'); if (g) { const v = g.style.display !== 'none' && g.style.display !== ''; g.style.display = v ? 'none' : 'flex'; } }
+        'p': () => { const g = document.getElementById('ss-gallery'); if (g) { const h = !g.classList.contains('ss-user-hidden'); g.classList.toggle('ss-user-hidden', h); g.style.display = h ? 'none' : 'flex'; } }
     };
 
     const handler = actions[e.key.toLowerCase()];
@@ -896,8 +896,9 @@ function injectUI() {
     dock.appendChild(mkBtn('👥', 'ss-b-people', () => {
         const g = document.getElementById('ss-gallery');
         if (!g) return;
-        const visible = g.style.display !== 'none' && g.style.display !== '';
-        g.style.display = visible ? 'none' : 'flex';
+        const hiding = !g.classList.contains('ss-user-hidden');
+        g.classList.toggle('ss-user-hidden', hiding);
+        g.style.display = hiding ? 'none' : 'flex';
     }, 'Participants (Alt+P)'));
 
     const sep = document.createElement('div');
