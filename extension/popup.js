@@ -178,6 +178,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
             const avatar = u.avatar || avatars[Math.abs(u.id.split('').reduce((a,b)=>a+b.charCodeAt(0),0)) % avatars.length];
 
+            const isMe = u.id === room.myId || u.username === room.myUsername;
+
             const av = document.createElement('div');
             av.className   = 'user-av';
             av.style.background = 'rgba(255,255,255,0.05)';
@@ -188,7 +190,8 @@ document.addEventListener('DOMContentLoaded', () => {
             av.textContent = avatar;
 
             const name = document.createElement('span');
-            name.textContent = u.username
+            name.textContent = (isMe ? 'You' : u.username)
+                + (isMe ? ` (${u.username})` : '')
                 + (u.isHost   ? ' 👑' : '')
                 + (u.isInCall ? ' 🎤' : '');
             item.appendChild(av);

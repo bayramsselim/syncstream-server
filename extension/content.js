@@ -27,8 +27,10 @@ let lastHostId      = null;
 let isAway          = false;
 let awayTimer       = null;
 let lastSyncTime    = 0;
-let wasPaused       = true; // Tracks previous state to identify play vs resume
-let isInitialLoad   = true; // Suppresses sync messages on first load
+let wasPaused       = true; 
+let isInitialLoad   = true; 
+let userAvatars     = {};   // Global ID -> Avatar map
+let userColors      = {};   // Global ID -> Color map
 
 const IS_TOP_FRAME = (window === window.top);
 const ICE_SERVERS  = {
@@ -47,10 +49,10 @@ const ICE_SERVERS  = {
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
-function getAvatar(idOrName, forcedAvatar) {
-    if (forcedAvatar) return forcedAvatar;
-    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
-    const idStr = String(idOrName || 'anon');
+function getAvatar(id, nameFallback) {
+    if (id && userAvatars[id]) return userAvatars[id];
+    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', 'REX', '🦋', '🐘', '🦒', '🦓'];
+    const idStr = String(id || nameFallback || 'anon');
     const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
     return avatars[idx];
 }
@@ -106,9 +108,16 @@ chrome.runtime.onMessage.addListener((msg) => {
     if      (msg.type === 'ROOM_STATE')    {
         const prevHostId = lastHostId;
         roomState = msg.data;
+        if (roomState.users) {
+            roomState.users.forEach(u => {
+                userAvatars[u.id] = u.avatar;
+                userColors[u.id] = u.color;
+            });
+        }
         if (roomState.myId) initPeers();
         updateParticipantPanel();
         syncAvatarTiles(roomState.users || []);
+        
         // Close & remove peer connections for users who left
         const activeIds = new Set((roomState.users || []).map(u => u.id));
         Object.keys(peerConnections).forEach(peerId => {
@@ -118,7 +127,7 @@ chrome.runtime.onMessage.addListener((msg) => {
             }
         });
         const _rt = document.getElementById('ss-reconnect-toast'); if (_rt) _rt.remove();
-        // Host change notification
+        
         const newHost = (roomState.users || []).find(u => u.isHost);
         if (newHost && prevHostId && newHost.id !== prevHostId) {
             if (newHost.id === roomState.myId) showToast('👑 You are now the host!', '#f59e0b');
@@ -229,6 +238,11 @@ function broadcastState(event = 'sync') {
     const time = videoElement.currentTime;
     const rate = videoElement.playbackRate;
 
+    // Logic Fix: Immediate feedback for manual actions
+    if (event !== 'sync') {
+        console.log(`[SyncStream] Broadcasting ${event} at ${time}`);
+    }
+
     chrome.runtime.sendMessage({
         type: 'PLAYER_EVENT', event,
         time: time,
@@ -322,8 +336,12 @@ function applyRemoteSync(msg) {
         setTimeout(doApply, 3000);
     }
 
-    // 1s lock for remote syncs to ensure all triggered events (play, seek, etc) are ignored
-    setTimeout(() => { isSyncing = false; }, 1000); 
+    // 0.8s lock for remote syncs to ensure all triggered events are ignored
+    // Reduced from 1.0s to allow faster response to user actions
+    setTimeout(() => { isSyncing = false; }, 800); 
+
+    // Debug Log
+    console.log(`[SyncStream] Applied remote ${msg.event} by ${msg.byUsername} at ${msg.time}`);
 
     // Add a system event line in chat (Netflix Party style)
     const actor = msg.byUsername || '';
@@ -600,7 +618,7 @@ function createTileShell(id, name, color, avatar) {
     av.id = `ss-av-${id}`;
     av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1c2e;z-index:1;';
     
-    const displayAvatar = getAvatar(name || (id === 'local' ? (roomState?.myUsername || 'You') : 'Anon'), avatar);
+    const displayAvatar = getAvatar(id, name);
 
     const avCircle = document.createElement('div');
     avCircle.style.cssText = `font-size:48px;filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));`;
@@ -741,6 +759,12 @@ function syncAvatarTiles(users) {
     if (counter) {
         const total = users.length;
         counter.textContent = String(total);
+    }
+
+    // Update local tile avatar if it changed
+    if (roomState?.myId) {
+        const myAvCircle = document.querySelector(`#ss-av-local > div`);
+        if (myAvCircle && roomState.myAvatar) myAvCircle.textContent = roomState.myAvatar;
     }
 
     // Remove tiles for users who left
@@ -974,11 +998,11 @@ function updateUnreadBadge() {
 }
 
 let _ssRestoring = false;
-function addChatMessage(user, text, color, avatar) {
+function addChatMessage(user, text, color, avatar, userId) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
 
-    const displayAvatar = getAvatar(user, avatar);
+    const displayAvatar = avatar || getAvatar(userId, user);
 
     const m = document.createElement('div');
     m.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.25s ease;align-items:flex-start;';
@@ -1620,7 +1644,7 @@ function injectUI() {
 
     // Logic Fix: Ensure local participant tile is always visible (as requested)
     if (roomState?.myId) {
-        createTileShell('local', roomState.myUsername || 'You', roomState.myColor);
+        createTileShell('local', roomState.myUsername || 'You', roomState.myColor, roomState.myAvatar);
     }
 
     // ── UTILS / EVENTS ───────────────────────────────────────────────────────
