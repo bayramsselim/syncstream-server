@@ -17,6 +17,8 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
+    window.__ssFSVersion = 'STYLESHEET-2026-05-04';
+    console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
        and might miss the moment of intercept). Top frame broadcasts SS_ACTIVE to
