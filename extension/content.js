@@ -50,8 +50,9 @@ const ICE_SERVERS  = {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function getAvatar(id, nameFallback) {
-    if (id && userAvatars[id]) return userAvatars[id];
-    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', 'REX', '🦋', '🐘', '🦒', '🦓'];
+    const actualId = id === 'local' ? roomState?.myId : id;
+    if (actualId && userAvatars[actualId]) return userAvatars[actualId];
+    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
     const idStr = String(id || nameFallback || 'anon');
     const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
     return avatars[idx];
@@ -1427,7 +1428,7 @@ function injectUI() {
             const history = res[key] || [];
             history.forEach(m => {
                 if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor, isHtml: m.isHtml });
-                else                  addChatMessage(m.user, m.text, m.color);
+                else                  addChatMessage(m.user, m.text, m.color, m.avatar);
             });
             _ssRestoring = false;
         });
