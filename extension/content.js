@@ -130,8 +130,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'NOW_PLAYING') {
         const el = document.getElementById('ss-np-title');
         if (el) el.textContent = msg.title || '—';
-        // Add to chat history when title actually changes (skip first set)
-        if (msg.title && lastTitle && lastTitle !== msg.title) {
+        
+        // Only add to chat if the title is actually different and not empty
+        if (msg.title && lastTitle && msg.title !== lastTitle && msg.title !== 'Waiting for video...') {
             addSystemMessage(`now playing: ${msg.title}`, '#6366f1', { actor: '' });
         }
         if (msg.title) lastTitle = msg.title;
@@ -184,9 +185,8 @@ function applyRemoteSync(msg) {
 
     if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
     
-    // Increased lock time from 150ms to 800ms to allow the video player 
-    // to finish buffering and firing its own events before we listen again.
-    setTimeout(() => { isSyncing = false; }, 800); 
+    // Reduced from 800ms to 500ms for better responsiveness
+    setTimeout(() => { isSyncing = false; }, 500); 
 
     // Add a system event line in chat (Netflix Party style):
     //   "Selim paused the video at 1:37"
@@ -430,7 +430,10 @@ function updateGalleryLayout() {
         tile.style.opacity = '1';
     });
 
-    if (counter) counter.textContent = hiddenCount > 0 ? `${count}/${allTiles.length}` : String(count);
+    if (counter) {
+        const total = visibleTiles.length + (hiddenCount); // All known users
+        counter.textContent = String(allTiles.length + (document.getElementById('ss-vid-local') ? 1 : 0));
+    }
 }
 
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
@@ -582,6 +585,13 @@ function syncAvatarTiles(users) {
             if (lbl) lbl.textContent = u.username + (u.isAway ? ' 😴' : '') + (u.isHost ? ' 👑' : '');
         }
     });
+
+    // Update gallery count title
+    const counter = document.getElementById('ss-gallery-count');
+    if (counter) {
+        const total = users.length;
+        counter.textContent = String(total);
+    }
 
     // Remove tiles for users who left
     inner.querySelectorAll('[id^="ss-vid-"]').forEach(tile => {
@@ -1406,17 +1416,30 @@ function mainLoop() {
         loopInterval = setInterval(mainLoop, 2000);
     }
 
-    // Now Playing — detect title change and report
-    if (IS_TOP_FRAME && roomState) {
+    // Now Playing — Only the HOST reports the title to the room to avoid loops
+    if (IS_TOP_FRAME && roomState && roomState.isHost) {
         let title = document.title;
-        const h1 = document.querySelector('h1.ytd-video-primary-info-renderer, h1[class*="title"], .video-title');
+        const h1 = document.querySelector('h1.ytd-video-primary-info-renderer, h1[class*="title"], .video-title, #video-title');
         if (h1?.innerText) title = h1.innerText.trim();
+        
         if (title && title !== lastTitle && title !== document.location.hostname) {
             lastTitle = title;
             chrome.runtime.sendMessage({ type: 'UPDATE_NOW_PLAYING', title, url: window.location.href }).catch(() => {});
             const npEl = document.getElementById('ss-np-title');
             if (npEl) npEl.textContent = title;
         }
+    }
+
+    // Non-host: If we are on a different URL than the room, show a warning
+    if (IS_TOP_FRAME && roomState && !roomState.isHost && roomState.nowPlayingUrl) {
+        try {
+            const roomUrl = new URL(roomState.nowPlayingUrl);
+            const myUrl   = new URL(window.location.href);
+            // Check if base URL (without hash/params) is different
+            if (roomUrl.pathname !== myUrl.pathname && !document.getElementById('ss-nav-toast')) {
+                showNavigateToast(roomState.nowPlayingUrl, roomState.nowPlaying, 'Host');
+            }
+        } catch(_) {}
     }
 }
 
