@@ -173,10 +173,21 @@ document.addEventListener('DOMContentLoaded', () => {
         (room.users || []).forEach(u => {
             const item = document.createElement('div');
             item.className = 'user-item';
+            
+            // Fun Avatar Mapping (Matches content.js)
+            const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
+            const avatarIdx = Math.abs(u.id.split('').reduce((a,b)=>a+b.charCodeAt(0),0)) % avatars.length;
+            const avatar = avatars[avatarIdx];
+
             const av = document.createElement('div');
             av.className   = 'user-av';
-            av.style.background = u.color || '#6366f1';
-            av.textContent = u.username.charAt(0).toUpperCase();
+            av.style.background = 'rgba(255,255,255,0.05)';
+            av.style.fontSize = '14px';
+            av.style.display = 'flex';
+            av.style.alignItems = 'center';
+            av.style.justifyContent = 'center';
+            av.textContent = avatar;
+
             const name = document.createElement('span');
             name.textContent = u.username
                 + (u.isHost   ? ' 👑' : '')

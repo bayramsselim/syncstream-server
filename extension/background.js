@@ -58,10 +58,13 @@ function connectWebSocket() {
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'ROOM_UPDATE') {
-                const me = data.users.find(u => u.username === currentRoom?.myUsername);
+                // Logic Fix: Identify 'me' by ID instead of username for robustness
+                const me = data.users.find(u => u.id === currentRoom?.myId) || 
+                           data.users.find(u => u.username === currentRoom?.myUsername);
+                
                 currentRoom = {
                     ...data,
-                    myUsername: currentRoom?.myUsername,
+                    myUsername: currentRoom?.myUsername || me?.username,
                     myId: me?.id || currentRoom?.myId,
                     isHost: me?.isHost || false
                 };
@@ -133,9 +136,11 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (!roomTabs.has(tabId) || !changeInfo.url || !currentRoom?.roomId) return;
     
-    // Only the host (in their primary tab) can trigger room navigation
-    const canNavigate = currentRoom.isHost || !currentRoom.hostControlOnly;
-    if (!canNavigate) return;
+    // Only the host can trigger room navigation
+    if (!currentRoom.isHost) return;
+
+    // Logic Fix: Prevent redundant navigation messages if URL hasn't meaningfully changed
+    if (currentRoom.nowPlayingUrl === changeInfo.url) return;
 
     if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
@@ -187,6 +192,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
     else if (['PLAYER_EVENT', 'CHAT_MESSAGE', 'REACTION', 'UPDATE_NOW_PLAYING', 'SIGNALING', 'TOGGLE_CALL', 'USER_STATUS'].includes(request.type)) {
         if (socket?.readyState === WebSocket.OPEN && currentRoom?.roomId) {
+            // Logic Fix: Hybrid Control Model
+            // Playback events (play/pause/seek) are allowed for all participants.
+            // Navigation events (video changes) are restricted to the host.
+            const navTypes = ['UPDATE_NOW_PLAYING', 'HOST_NAVIGATE'];
+            if (navTypes.includes(request.type) && !currentRoom.isHost) {
+                console.log('[SyncStream] Ignored navigation event from non-host:', request.type);
+                return;
+            }
+
             request.roomId = currentRoom.roomId;
             socket.send(JSON.stringify(request));
         }

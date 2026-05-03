@@ -22,9 +22,13 @@ let isChatOpen      = false;
 let unreadCount     = 0;
 let lastTitle       = '';
 let videoFound      = false;
+let lastSeekTime    = 0;
 let lastHostId      = null;
 let isAway          = false;
 let awayTimer       = null;
+let lastSyncTime    = 0;
+let wasPaused       = true; // Tracks previous state to identify play vs resume
+let isInitialLoad   = true; // Suppresses sync messages on first load
 
 const IS_TOP_FRAME = (window === window.top);
 const ICE_SERVERS  = {
@@ -42,6 +46,14 @@ const ICE_SERVERS  = {
     ]
 };
 
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
+function getAvatar(idOrName) {
+    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
+    const idStr = String(idOrName || 'anon');
+    const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
+    return avatars[idx];
+}
+
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
     if (res?.myId) {
@@ -52,16 +64,17 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
             injectUI();
             syncAvatarTiles(res.users || []);
             initPeers();
-            try {
-                chrome.storage.session.get(['ssMicOn', 'ssCamOn'], (stored) => {
-                    if (chrome.runtime.lastError || !stored) return;
-                    if (stored.ssMicOn || stored.ssCamOn) {
-                        isMicOn = stored.ssMicOn || false;
-                        isCamOn = stored.ssCamOn || false;
-                        updateMedia();
-                    }
-                });
-            } catch (_) { /* storage.session unavailable in this context */ }
+            
+            // Logic Fix: Persistent Media Recovery (Local + Session fallback)
+            chrome.storage.local.get(['ssMicOn', 'ssCamOn', 'ssInCall'], (data) => {
+                if (data.ssMicOn || data.ssCamOn || data.ssInCall) {
+                    isMicOn = !!data.ssMicOn;
+                    isCamOn = !!data.ssCamOn;
+                    console.log('[SyncStream] Fast-recovering media session...');
+                    // No delay for faster recovery
+                    updateMedia(); 
+                }
+            });
         }
     } else if (IS_TOP_FRAME) {
         try {
@@ -73,7 +86,12 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'SYNC_STATE') { applyRemoteSync(msg); return; }
+    if (msg.type === 'SYNC_STATE') { 
+        // Logic Fix: Immediate host protection
+        if (roomState?.isHost) return;
+        applyRemoteSync(msg); 
+        return; 
+    }
 
     // Keep data-ss-active in sync in ALL frames (needed by content-main.js intercept)
     if (msg.type === 'ROOM_STATE' && msg.data?.roomId) {
@@ -106,6 +124,30 @@ chrome.runtime.onMessage.addListener((msg) => {
             else showToast(`👑 ${newHost.username} is the new host`, '#f59e0b');
         }
         lastHostId = newHost?.id || null;
+
+        // Logic Fix: Robust Auto-sync on Join/Update
+        // ONLY non-hosts should ever auto-sync to the room state
+        if (roomState && !roomState.isHost && roomState.currentTime !== undefined) {
+            const v = findMainVideo();
+            if (v) {
+                const doSync = () => {
+                    if (Date.now() - lastSyncTime < 500) return; // Prevent spam
+                    lastSyncTime = Date.now();
+                    applyRemoteSync({
+                        event: roomState.isPaused ? 'pause' : 'play',
+                        time: roomState.currentTime,
+                        playbackRate: roomState.playbackRate || 1
+                    });
+                };
+                if (v.readyState >= 2) doSync();
+                else {
+                    v.addEventListener('loadedmetadata', doSync, { once: true });
+                    v.addEventListener('canplay', doSync, { once: true });
+                }
+                // Force a sync attempt after a small delay regardless
+                setTimeout(doSync, 2000);
+            }
+        }
     }
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
     else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
@@ -122,76 +164,160 @@ chrome.runtime.onMessage.addListener((msg) => {
                          : verb === 'left'   ? 'left the party'
                          :                     'disconnected';
             addSystemMessage(phrase, msg.color, { actor: m[1] });
+            if (verb === 'joined') {
+                playNotifSound();
+                // Logic Fix: Host broadcasts current state to help newcomer sync instantly
+                if (roomState?.isHost) setTimeout(() => broadcastState('sync'), 1000);
+            }
         } else {
             // Generic toast still goes on-screen (errors, transient notices)
             showToast(text, msg.color);
         }
     }
-    else if (msg.type === 'NOW_PLAYING') {
-        const el = document.getElementById('ss-np-title');
-        if (el) el.textContent = msg.title || '—';
-        
-        // Only add to chat if the title is actually different and not empty
-        if (msg.title && lastTitle && msg.title !== lastTitle && msg.title !== 'Waiting for video...') {
+    else if (msg.type === 'UPDATE_NOW_PLAYING' || msg.type === 'NOW_PLAYING') {
+        // Logic Fix: Align with server's 'NOW_PLAYING' message type
+        // Only show message if title actually changed to prevent chat spam
+        const npEl = document.getElementById('ss-np-title');
+        const oldTitle = npEl ? npEl.textContent : '';
+        if (msg.title && msg.title !== oldTitle) {
             addSystemMessage(`now playing: ${msg.title}`, '#6366f1', { actor: '' });
         }
-        if (msg.title) lastTitle = msg.title;
+        if (npEl) npEl.textContent = msg.title || '—';
     }
     else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
     else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
-    else if (msg.type === 'HOST_NAVIGATE') showNavigateToast(msg.url, msg.title, msg.username);
+    else if (msg.type === 'HOST_NAVIGATE') {
+        // Logic Fix: Host should ignore their own navigation messages to prevent loops
+        if (roomState?.isHost) return;
+
+        if (msg.url && window.location.href !== msg.url) {
+            window.location.href = msg.url;
+        }
+    }
     else if (msg.type === 'JOIN_ERROR')    showToast(`❌ ${msg.message || 'Could not join room'}`, '#ef4444');
 });
 
 // ─── VIDEO SYNC ───────────────────────────────────────────────────────────────
 function findMainVideo() {
-    return Array.from(document.querySelectorAll('video'))
-        .filter(v => v.offsetWidth > 100 && !v.id.startsWith('ss-v-'))
-        .sort((a, b) => b.offsetWidth - a.offsetWidth)[0];
+    // Logic Fix: Filter out small videos (ads, previews) and hidden ones
+    const videos = Array.from(document.querySelectorAll('video')).filter(v => {
+        const r = v.getBoundingClientRect();
+        return r.width > 200 && r.height > 100 && v.offsetParent !== null && !v.id.startsWith('ss-v-');
+    });
+    if (!videos.length) return null;
+    return videos.sort((a, b) => b.offsetWidth - a.offsetWidth)[0];
 }
 
 function broadcastState(event = 'sync') {
     if (!videoElement || isSyncing || !roomState) return;
+
+    // Logic Fix: Only the host can broadcast if Host Control Only is enabled
+    if (roomState.hostControlOnly && !roomState.isHost) return;
+
+    // Logic Fix: Participants should not broadcast if they are on a different video than the host
+    if (!roomState.isHost && roomState.nowPlayingUrl) {
+        try {
+            const hostUrl = new URL(roomState.nowPlayingUrl);
+            const myUrl   = new URL(window.location.href);
+            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) {
+                return; // Not on the same video, don't broadcast
+            }
+        } catch(e) {}
+    }
+    
+    const time = videoElement.currentTime;
+    const rate = videoElement.playbackRate;
+
     chrome.runtime.sendMessage({
         type: 'PLAYER_EVENT', event,
-        time: videoElement.currentTime,
-        playbackRate: videoElement.playbackRate
+        time: time,
+        playbackRate: rate
     }).catch(() => {});
+
+    // Show locally too so the user sees their own actions in chat (like Teleparty)
+    let line = '';
+    const t = fmtTime(time);
+    if      (event === 'play')   line = wasPaused ? 'started playing the video' : 'resumed at ' + t;
+    else if (event === 'pause') {
+        // Logic Fix: Don't show pause message if it's just a side-effect of seeking
+        if (Date.now() - lastSeekTime < 500) return;
+        line = 'paused the video at ' + t;
+    }
+    else if (event === 'seek') {
+        lastSeekTime = Date.now();
+        line = 'jumped to ' + t;
+    }
+    else if (event === 'rate')   line = `changed speed to ${rate}x`;
+
+    // Suppress "00:00 paused" at video start
+    if (event === 'pause' && (time < 0.1 || time === 0) && isInitialLoad) { line = ''; }
+    
+    if (line) addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
+    if (event === 'play' || event === 'pause') {
+        wasPaused = (event === 'pause');
+    }
+    isInitialLoad = false;
+
+    isSyncing = true;
+    setTimeout(() => { isSyncing = false; }, 400); 
 }
 
 function applyRemoteSync(msg) {
     if (!videoElement) videoElement = findMainVideo();
-    if (!videoElement) return;
-    isSyncing = true;
+    if (!videoElement || !roomState) return;
 
+    // Logic Fix: Host should NEVER apply remote sync to themselves to avoid loops
+    if (roomState.isHost) return;
+
+    // CRITICAL: Only sync if we are on the same video/URL as the host
+    if (roomState?.nowPlayingUrl) {
+        try {
+            const hostUrl = new URL(roomState.nowPlayingUrl);
+            const myUrl   = new URL(window.location.href);
+            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) {
+                console.log('[SyncStream] Ignoring sync: URL mismatch', { host: hostUrl.pathname, mine: myUrl.pathname });
+                return; 
+            }
+        } catch(e) {}
+    }
+
+    isSyncing = true;
     const diff = Math.abs(videoElement.currentTime - msg.time);
     const wasPaused = videoElement.paused;
 
-    // If the difference is negligible, don't trigger a seek (prevents micro-loops)
-    if (msg.event === 'seek' && diff < 0.2) {
-        isSyncing = false;
-        return;
+    // Logic Fix: Wait for video to be ready before applying sync if it's uninitialized
+    const doApply = () => {
+        // Threshold (0.8s) for drift, but instant for play/pause/seek
+        if (diff > 0.8 || wasPaused !== (msg.event === 'pause') || msg.event === 'seek' || msg.event === 'sync') {
+            if (msg.event === 'play') {
+                videoElement.currentTime = msg.time;
+                videoElement.play().catch(() => {
+                    // Try to play again after a short delay if it fails
+                    setTimeout(() => videoElement.play().catch(() => {}), 500);
+                });
+            } else if (msg.event === 'pause') {
+                videoElement.pause();
+                videoElement.currentTime = msg.time;
+            } else if (msg.event === 'seek' || msg.event === 'sync') {
+                videoElement.currentTime = msg.time;
+            }
+        }
+        if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
+    };
+
+    if (videoElement.readyState >= 2) {
+        doApply();
+    } else {
+        videoElement.addEventListener('loadedmetadata', doApply, { once: true });
+        videoElement.addEventListener('canplay', doApply, { once: true });
+        // Fallback for extremely slow loads
+        setTimeout(doApply, 3000);
     }
 
-    if (msg.event === 'pause') {
-        videoElement.currentTime = msg.time; 
-        if (!videoElement.paused) videoElement.pause();
-    } else if (msg.event === 'play') {
-        if (diff > 0.5) videoElement.currentTime = msg.time;
-        if (videoElement.paused) videoElement.play().catch(() => {});
-    } else if (msg.event === 'seek' || diff > 0.5) {
-        videoElement.currentTime = msg.time;
-    }
+    // Reduced lock duration for faster recovery
+    setTimeout(() => { isSyncing = false; }, 400); 
 
-    if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
-    
-    // Reduced from 800ms to 500ms for better responsiveness
-    setTimeout(() => { isSyncing = false; }, 500); 
-
-    // Add a system event line in chat (Netflix Party style):
-    //   "Selim paused the video at 1:37"
-    //   "Ali jumped to 12:34"
-    //   "Beni started playing the video"
+    // Add a system event line in chat (Netflix Party style)
     const actor = msg.byUsername || '';
     const userColor = (roomState?.users || []).find(u => u.username === actor)?.color;
     const t = fmtTime(msg.time);
@@ -200,7 +326,16 @@ function applyRemoteSync(msg) {
     else if (msg.event === 'pause')  line = 'paused the video at ' + t;
     else if (msg.event === 'seek')   line = 'jumped to ' + t;
     else if (msg.event === 'rate')   line = `changed speed to ${msg.playbackRate}x`;
+
+    // Suppress redundant sync messages on initial load
+    if (isInitialLoad && (msg.event === 'play' || msg.event === 'pause')) { line = ''; }
+    
     if (line) addSystemMessage(line, userColor, { actor });
+    
+    if (msg.event === 'play' || msg.event === 'pause') {
+        wasPaused = (msg.event === 'pause');
+    }
+    isInitialLoad = false;
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
@@ -311,7 +446,7 @@ async function updateMedia() {
             }
         }
     } catch (e) { console.error('[SS] Media:', e); isMicOn = false; isCamOn = false; }
-    chrome.storage.session.set({ ssMicOn: isMicOn, ssCamOn: isCamOn }).catch(() => {});
+    chrome.storage.local.set({ ssMicOn: isMicOn, ssCamOn: isCamOn, ssInCall: (isMicOn || isCamOn) }).catch(() => {});
     updateButtons();
 }
 
@@ -452,17 +587,20 @@ function createTileShell(id, name, color) {
     v.style.cssText = `width:100%;height:100%;object-fit:cover;display:none;${id === 'local' ? 'transform:scaleX(-1);' : ''}`;
     tile.appendChild(v);
 
-    // Avatar overlay (remote only) — shown until video stream arrives
-    if (id !== 'local') {
-        const av = document.createElement('div');
-        av.id = `ss-av-${id}`;
-        av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#111;z-index:1;';
-        const avCircle = document.createElement('div');
-        avCircle.style.cssText = `width:54px;height:54px;border-radius:50%;background:${color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;color:#111;`;
-        avCircle.textContent = (name||'?').charAt(0).toUpperCase();
-        av.appendChild(avCircle);
-        tile.appendChild(av);
+    // Avatar overlay (ALL users) — shown until video stream arrives or when camera is off
+    const av = document.createElement('div');
+    av.id = `ss-av-${id}`;
+    av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1c2e;z-index:1;';
+    
+    const avatar = getAvatar(name || (id === 'local' ? (roomState?.myUsername || 'You') : 'Anon'));
 
+    const avCircle = document.createElement('div');
+    avCircle.style.cssText = `font-size:48px;filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));`;
+    avCircle.textContent = avatar;
+    av.appendChild(avCircle);
+    tile.appendChild(av);
+
+    if (id !== 'local') {
         // Signal quality dot
         const sig = document.createElement('div');
         sig.className = 'ss-signal';
@@ -523,7 +661,7 @@ function createTileShell(id, name, color) {
     }
 
     inner.appendChild(tile);
-    requestAnimationFrame(() => { tile.style.opacity = '1'; });
+    requestAnimationFrame(() => { tile.style.opacity = '1'; updateGalleryLayout(); });
     return tile;
 }
 
@@ -604,20 +742,14 @@ function syncAvatarTiles(users) {
 }
 
 function removeVideoTile(id) {
-    if (id === 'local') {
-        const el = document.getElementById('ss-vid-local');
-        if (!el) return;
-        el.style.opacity = '0';
-        setTimeout(() => { el.remove(); updateGalleryLayout(); }, 280);
-        return;
-    }
-    // Remote: revert to avatar instead of full removal
+    // Revert to avatar instead of full removal
     const vEl = document.getElementById(`ss-v-${id}`);
     const av  = document.getElementById(`ss-av-${id}`);
     if (vEl) { vEl.srcObject = null; vEl.style.display = 'none'; }
     if (av)  av.style.display = 'flex';
     const tile = document.getElementById(`ss-vid-${id}`);
     if (tile) {
+        tile.style.display = ''; // Ensure it's not display:none
         const sig = tile.querySelector('.ss-signal');
         if (sig) { sig.style.background = '#555'; sig.style.boxShadow = 'none'; sig.title = 'Awaiting stream'; }
     }
@@ -764,38 +896,24 @@ function showNavigateToast(url, title, username) {
 
     const bottom = document.createElement('div');
     bottom.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;';
-
-    const countdown = document.createElement('span');
-    countdown.style.cssText = 'font-size:11px;color:#555;flex:1;';
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Cancel';
-    cancelBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;padding:7px 14px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600;transition:background 0.15s;flex-shrink:0;';
-    cancelBtn.onmouseenter = () => { cancelBtn.style.background = 'rgba(255,255,255,0.16)'; };
-    cancelBtn.onmouseleave = () => { cancelBtn.style.background = 'rgba(255,255,255,0.08)'; };
-
     const goBtn = document.createElement('button');
-    goBtn.textContent = 'Go Now';
-    goBtn.style.cssText = 'background:#6366f1;border:none;color:#fff;padding:7px 16px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s;flex-shrink:0;';
-    goBtn.onmouseenter = () => { goBtn.style.background = '#4f46e5'; };
-    goBtn.onmouseleave = () => { goBtn.style.background = '#6366f1'; };
+    goBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;padding:8px 14px;border-radius:10px;font-size:11px;font-weight:700;cursor:pointer;';
+    goBtn.textContent = 'SWITCH NOW';
+    goBtn.onclick = () => { clearInterval(t._timer); window.location.href = url; };
 
-    bottom.appendChild(countdown);
-    bottom.appendChild(cancelBtn);
+    const stayBtn = document.createElement('button');
+    stayBtn.style.cssText = 'background:none;border:none;color:#aaa;font-size:11px;cursor:pointer;';
+    stayBtn.textContent = 'Stay here';
+    stayBtn.onclick = () => { clearInterval(t._timer); t.remove(); };
+
+    bottom.appendChild(stayBtn);
     bottom.appendChild(goBtn);
     t.appendChild(top);
     t.appendChild(titleEl);
     t.appendChild(bottom);
     (document.getElementById('ss-root') || document.body).appendChild(t);
 
-    let s = 5;
-    const update = () => { countdown.textContent = `Auto-navigating in ${s}s`; };
-    update();
-
-    const navigate = () => { clearInterval(t._timer); t.remove(); window.location.href = url; };
-    cancelBtn.onclick = (e) => { e.stopPropagation(); clearInterval(t._timer); t.remove(); };
-    goBtn.onclick     = (e) => { e.stopPropagation(); navigate(); };
-    t._timer = setInterval(() => { s--; if (s <= 0) navigate(); else update(); }, 1000);
+    t._timer = setTimeout(() => { t.remove(); }, 15000);
 }
 
 // ─── NOTIFICATION SOUND ───────────────────────────────────────────────────────
@@ -816,13 +934,17 @@ function playNotifSound() {
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
 function handleIncomingChat(user, text, color) {
-    addChatMessage(user, text, color);
+    if (text && text.startsWith('gif:')) {
+        const url = text.replace('gif:', '');
+        addSystemMessage(`<img src="${url}" style="width:100%;border-radius:12px;margin-top:6px;box-shadow:0 8px 30px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);display:block;">`, color, { actor: user, isHtml: true });
+    } else {
+        addChatMessage(user, text, color);
+    }
+
     if (!isChatOpen) {
         unreadCount++;
         updateUnreadBadge();
         playNotifSound();
-        // Flash the panel toggle so user notices the new message even if panel
-        // is closed (replaces old dock chat-button flash).
         const tog = document.getElementById('ss-panel-toggle');
         if (tog) {
             const orig = tog.style.background;
@@ -843,13 +965,33 @@ let _ssRestoring = false;
 function addChatMessage(user, text, color) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
+
+    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
+    const avatar = getAvatar(user);
+
     const m = document.createElement('div');
-    m.style.cssText = 'font-size:12px;word-wrap:break-word;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.2s ease;';
-    const b = document.createElement('b');
-    b.style.color = color || '#6366f1'; b.textContent = user + ':';
-    const s = document.createElement('span');
-    s.style.color = '#ddd'; s.textContent = ' ' + text;
-    m.appendChild(b); m.appendChild(s);
+    m.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.25s ease;align-items:flex-start;';
+    
+    const av = document.createElement('div');
+    av.style.cssText = `flex-shrink:0;width:28px;height:28px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;border:1px solid rgba(255,255,255,0.1);`;
+    av.textContent = avatar;
+
+    const content = document.createElement('div');
+    content.style.cssText = 'flex:1;min-width:0;';
+
+    const b = document.createElement('div');
+    b.style.cssText = `font-size:11px;font-weight:700;color:${color || '#6366f1'};margin-bottom:2px;display:flex;align-items:center;gap:4px;`;
+    b.textContent = user;
+    
+    const s = document.createElement('div');
+    s.style.cssText = 'color:#eee;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;';
+    s.textContent = text;
+
+    content.appendChild(b);
+    content.appendChild(s);
+    m.appendChild(av);
+    m.appendChild(content);
+    
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
@@ -878,19 +1020,27 @@ function addSystemMessage(text, color, opts) {
     if (!msgs) return;
     const o = opts || {};
     const m = document.createElement('div');
-    m.style.cssText = 'font-size:11px;color:#888;font-style:italic;padding:4px 2px;animation:ss-fadein 0.2s ease;letter-spacing:0.01em;';
+    m.style.cssText = 'font-size:11px;color:#888;font-style:italic;padding:6px 2px;animation:ss-fadein 0.2s ease;letter-spacing:0.01em;';
     if (o.actor) {
         const a = document.createElement('span');
-        a.style.cssText = `color:${color || '#6366f1'};font-weight:600;font-style:normal;`;
+        a.style.cssText = `color:${color || '#6366f1'};font-weight:700;font-style:normal;`;
         a.textContent = o.actor;
         m.appendChild(a);
         m.appendChild(document.createTextNode(' '));
     }
-    m.appendChild(document.createTextNode(text));
+    
+    if (o.isHtml) {
+        const span = document.createElement('span');
+        span.innerHTML = text;
+        m.appendChild(span);
+    } else {
+        m.appendChild(document.createTextNode(text));
+    }
+    
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
-    saveToPersistentHistory({ kind: 'sys', actor: o.actor || '', text, color });
+    saveToPersistentHistory({ kind: 'sys', actor: o.actor || '', text, color, isHtml: !!o.isHtml });
 
     // Intentionally NO unread badge / no toggle flash / no sound — system events
     // are passive timeline entries, not actionable like chat messages. Only
@@ -1136,6 +1286,18 @@ function injectUI() {
     npTitle.textContent = 'Scanning...';
     npRow.appendChild(npLabel);
     npRow.appendChild(npTitle);
+
+    // Follow Host Banner (Hidden by default, shown if URL mismatch)
+    const followHost = document.createElement('div');
+    followHost.id = 'ss-follow-host';
+    followHost.style.cssText = 'padding:8px 16px;background:rgba(99,102,241,0.2);border-bottom:1px solid rgba(99,102,241,0.3);display:none;align-items:center;justify-content:space-between;gap:8px;animation:ss-fadein 0.3s ease;';
+    followHost.innerHTML = `
+        <div style="font-size:11px;color:#818cf8;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;">
+            Host is on another video
+        </div>
+        <button id="ss-join-host-btn" style="background:#6366f1;border:none;color:#fff;padding:4px 10px;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;white-space:nowrap;transition:transform 0.2s;">JOIN HOST</button>
+    `;
+    panel.appendChild(followHost);
     panel.appendChild(npRow);
 
     // ── SHARE MODAL ───────────────────────────────────────────────────────────
@@ -1229,7 +1391,7 @@ function injectUI() {
         chrome.storage.local.get([key], (res) => {
             const history = res[key] || [];
             history.forEach(m => {
-                if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor });
+                if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor, isHtml: m.isHtml });
                 else                  addChatMessage(m.user, m.text, m.color);
             });
             _ssRestoring = false;
@@ -1239,7 +1401,8 @@ function injectUI() {
     // ── REACTIONS ROW ────────────────────────────────────────────────────────
     const reactionsRow = document.createElement('div');
     reactionsRow.id = 'ss-reactions-row';
-    reactionsRow.style.cssText = 'padding:8px 14px 6px;display:flex;justify-content:space-around;align-items:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;';
+    reactionsRow.style.cssText = 'padding:8px 14px 6px;display:flex;justify-content:space-around;align-items:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;transition:all 0.3s ease;';
+    
     const REACTIONS = ['🥰','😡','😭','😂','🥳','🔥'];
     REACTIONS.forEach(em => {
         const rb = document.createElement('button');
@@ -1335,13 +1498,78 @@ function injectUI() {
     const emojiBtn = mkSmallBtn('😊', null, () => {
         emojiPicker.style.display = emojiPicker.style.display === 'grid' ? 'none' : 'grid';
     }, 'Emojis');
+
+    // Reaction Row Toggle
+    const reactToggleBtn = mkSmallBtn('🎭', 'ss-b-react-tog', () => {
+        const isHidden = reactionsRow.style.display === 'none';
+        reactionsRow.style.display = isHidden ? 'flex' : 'none';
+        reactToggleBtn.style.color = isHidden ? '#fff' : '#666';
+    }, 'Toggle Reactions Row');
+    reactToggleBtn.style.color = '#fff'; // Active by default
     
     const partyBtn = mkSmallBtn('🎉', null, () => {
         chrome.runtime.sendMessage({ type: 'REACTION', emoji: '🎉' });
     }, 'Quick Party!');
 
+    // GIF PICKER UI
+    const gifPicker = document.createElement('div');
+    gifPicker.id = 'ss-gif-picker';
+    gifPicker.style.cssText = 'position:absolute;bottom:100%;left:0;right:0;height:320px;background:#131422;border-top:1px solid #3f3f46;display:none;flex-direction:column;z-index:1000;box-shadow:0 -12px 32px rgba(0,0,0,0.6);border-radius:20px 20px 0 0;overflow:hidden;';
+    
+    const gifHeader = document.createElement('div');
+    gifHeader.style.cssText = 'padding:12px;display:flex;gap:8px;border-bottom:1px solid rgba(255,255,255,0.05);';
+    const gifSearch = document.createElement('input');
+    gifSearch.placeholder = 'Search GIFs...';
+    gifSearch.style.cssText = 'flex:1;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:8px 12px;color:#fff;font-size:12px;outline:none;';
+    gifHeader.appendChild(gifSearch);
+    gifPicker.appendChild(gifHeader);
+
+    const gifGrid = document.createElement('div');
+    gifGrid.style.cssText = 'flex:1;overflow-y:auto;display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:12px;';
+    gifPicker.appendChild(gifGrid);
+    
+    const searchGifs = async (q = '') => {
+        gifGrid.innerHTML = '<div style="grid-column:span 2;text-align:center;padding:40px;color:#666;font-size:11px;">Searching Tenor...</div>';
+        try {
+            const res = await fetch(`https://g.tenor.com/v1/search?q=${q || 'trending'}&key=LIVDSRZULEUB&limit=16&media_filter=minimal`);
+            const data = await res.json();
+            gifGrid.innerHTML = '';
+            if (!data.results?.length) {
+                gifGrid.innerHTML = '<div style="grid-column:span 2;text-align:center;padding:40px;color:#666;font-size:11px;">No GIFs found</div>';
+                return;
+            }
+            data.results.forEach(g => {
+                const img = document.createElement('img');
+                img.src = g.media[0].tinygif.url;
+                img.style.cssText = 'width:100%;height:90px;object-fit:cover;border-radius:10px;cursor:pointer;transition:transform 0.2s, border-color 0.2s;border:2px solid transparent;';
+                img.onclick = () => {
+                    chrome.runtime.sendMessage({ type: 'CHAT_MESSAGE', text: `gif:${g.media[0].gif.url}` });
+                    gifPicker.style.display = 'none';
+                };
+                img.onmouseenter = () => { img.style.transform = 'scale(1.02)'; img.style.borderColor = '#6366f1'; };
+                img.onmouseleave = () => { img.style.transform = 'scale(1)'; img.style.borderColor = 'transparent'; };
+                gifGrid.appendChild(img);
+            });
+        } catch(e) { gifGrid.innerHTML = '<div style="color:#ef4444;grid-column:span 2;text-align:center;padding:20px;">Error loading GIFs</div>'; }
+    };
+
+    let searchTimeout;
+    gifSearch.oninput = () => {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(() => searchGifs(gifSearch.value), 400);
+    };
+
+    const gifBtn = mkSmallBtn('🖼️', 'ss-b-gif', () => {
+        const isHidden = gifPicker.style.display === 'none';
+        gifPicker.style.display = isHidden ? 'grid' : 'none';
+        if (isHidden) searchGifs();
+    }, 'Send GIF');
+
+    rightCtrls.appendChild(gifBtn);
     rightCtrls.appendChild(emojiBtn);
     rightCtrls.appendChild(partyBtn);
+    
+    panel.insertBefore(gifPicker, inputRow);
     bottomRow.appendChild(leftCtrls);
     bottomRow.appendChild(rightCtrls);
     panel.appendChild(bottomRow);
@@ -1379,6 +1607,11 @@ function injectUI() {
     toggle.onclick = (e) => { e.stopPropagation(); setPanelOpen(!isChatOpen); };
     window.__ssTogglePanel = () => setPanelOpen(!isChatOpen);
 
+    // Logic Fix: Ensure local participant tile is always visible (as requested)
+    if (roomState?.myId) {
+        createTileShell('local', roomState.myUsername || 'You', roomState.myColor);
+    }
+
     // ── UTILS / EVENTS ───────────────────────────────────────────────────────
     const AWAY_MS = 3 * 60 * 1000;
     const resetAway = () => {
@@ -1399,6 +1632,15 @@ function injectUI() {
         if (roomState?.roomId) chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
     }, 30000);
 
+    // Initial Media Recovery: Check if we were in a call before page load
+    if (roomState?.users) {
+        const me = roomState.users.find(u => u.id === roomState.myId);
+        if (me?.isInCall && !localStream) {
+            console.log('[SyncStream] Initializing auto-resume media...');
+            setTimeout(updateMedia, 1500); // Give page some time to settle
+        }
+    }
+
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && roomState?.roomId) {
             chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
@@ -1406,6 +1648,16 @@ function injectUI() {
                     roomState = res;
                     updateParticipantPanel();
                     syncAvatarTiles(res.users || []);
+                    
+                    // Logic Fix: Persistent Media Recovery
+                    chrome.storage.local.get(['isCamOn', 'isMicOn'], (data) => {
+                        if (data.isCamOn || data.isMicOn) {
+                            isCamOn = !!data.isCamOn;
+                            isMicOn = !!data.isMicOn;
+                            console.log('[SyncStream] Auto-recovering media...', { isCamOn, isMicOn });
+                            updateMedia();
+                        }
+                    });
                 }
             });
         }
@@ -1466,14 +1718,40 @@ function mainLoop() {
     // Non-host: If we are on a different URL than the room, show a warning
     if (IS_TOP_FRAME && roomState && !roomState.isHost && roomState.nowPlayingUrl) {
         try {
-            const roomUrl = new URL(roomState.nowPlayingUrl);
+            const hostUrl = new URL(roomState.nowPlayingUrl);
             const myUrl   = new URL(window.location.href);
-            // Check if base URL (without hash/params) is different
-            if (roomUrl.pathname !== myUrl.pathname && !document.getElementById('ss-nav-toast')) {
-                showNavigateToast(roomState.nowPlayingUrl, roomState.nowPlaying, 'Host');
+            
+            const followBanner = document.getElementById('ss-follow-host');
+            const joinBtn      = document.getElementById('ss-join-host-btn');
+
+            // Check if base URL (origin + path) is different
+            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) {
+                // Show Follow Banner in panel
+                if (followBanner) {
+                    followBanner.style.display = 'flex';
+                    if (joinBtn) joinBtn.onclick = () => { window.location.href = roomState.nowPlayingUrl; };
+                }
+                
+                // Also show a toast if not already there
+                if (!document.getElementById('ss-nav-toast')) {
+                    showNavigateToast(roomState.nowPlayingUrl, roomState.nowPlaying, 'Host');
+                }
+            } else {
+                // We are on the right page!
+                if (followBanner) followBanner.style.display = 'none';
+                const existing = document.getElementById('ss-nav-toast');
+                if (existing) existing.remove();
             }
         } catch(_) {}
     }
 }
 
-loopInterval = setInterval(mainLoop, 500);
+loopInterval = setInterval(mainLoop, 400); // Increased frequency from 500ms to 400ms
+
+// Logic Fix: Graceful cleanup when navigating away
+window.addEventListener('beforeunload', () => {
+    if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+    }
+    Object.values(peerConnections).forEach(pc => pc.close());
+});

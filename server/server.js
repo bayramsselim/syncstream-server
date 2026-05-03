@@ -146,14 +146,29 @@ wss.on('connection', (ws) => {
                 if (room.hostControlOnly && ws.id !== room.host) return;
                 const url   = (data.url   || '').substring(0, 2000);
                 const title = (data.title || '').substring(0, 200);
+                
+                // Logic Fix: Persist navigation state so re-loaders get the right URL
+                room.nowPlaying = title;
+                room.nowPlayingUrl = url;
+
                 broadcastToRoom(ws.roomId, { type: 'HOST_NAVIGATE', url, title, username: ws.username }, ws);
             }
 
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 const room = rooms.get(ws.roomId);
-                room.nowPlaying    = (data.title || '').substring(0, 200);
-                room.nowPlayingUrl = (data.url   || '').substring(0, 500);
-                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying, url: room.nowPlayingUrl }, null);
+                if (!room || ws.id !== room.host) return;
+
+                const newTitle = (data.title || '').substring(0, 200);
+                const newUrl   = (data.url   || '').substring(0, 500);
+
+                // Logic Fix: Only broadcast if something actually changed
+                if (room.nowPlaying === newTitle && room.nowPlayingUrl === newUrl) return;
+
+                room.nowPlaying    = newTitle;
+                room.nowPlayingUrl = newUrl;
+                
+                // Logic Fix: Exclude host from broadcast to prevent redundant state updates
+                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying, url: room.nowPlayingUrl }, ws);
             }
         }
     });
