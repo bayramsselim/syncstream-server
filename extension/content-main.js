@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'FSEL-FIX-2026-05-04';
+    window.__ssFSVersion = 'DELEGATE-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -32,6 +32,12 @@
     if (window === window.top) {
         var fakeEl   = null;
         var savedAnc = null;
+
+        /* Capture original requestFullscreen on HTMLElement BEFORE we patch it,
+           so we can call it bypassing our own intercept (used to enter real
+           browser fullscreen on documentElement when iframe delegates capability). */
+        var ORIG_RFS = HTMLElement.prototype.requestFullscreen ||
+                       HTMLElement.prototype.webkitRequestFullscreen;
 
         /* Stylesheet-based fake-fs. Inline styles are vulnerable to site JS
            overwriting (`iframe.style.position = 'absolute'` strips !important).
@@ -120,6 +126,16 @@
             if (fakeEl) exitFake();
             fakeEl = fr;
 
+            /* Try real browser fullscreen on <html> first — uses delegated
+               activation if iframe sent SS_FS_REQ with `delegate: 'fullscreen'`.
+               If it succeeds, browser chrome (address bar, tabs) hides too.
+               If it fails (no activation, unsupported browser, etc.) the CSS
+               fake-fs below still gives a viewport-sized video. */
+            if (ORIG_RFS) {
+                try { ORIG_RFS.call(document.documentElement).catch(function(){}); }
+                catch (_) {}
+            }
+
             /* Apply visual state via attribute → stylesheet rules with
                !important. Site JS can't easily strip this since data-ss-fs
                attribute survives style.cssText / style.position assignments. */
@@ -161,6 +177,10 @@
                     });
                 });
                 savedAnc = null;
+            }
+            /* Exit real browser fullscreen too (if we entered it) */
+            if (document.fullscreenElement === document.documentElement) {
+                try { document.exitFullscreen().catch(function(){}); } catch (_) {}
             }
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
         }
@@ -368,7 +388,11 @@
             if (!isActive()) return orig.apply(this, arguments);
             if (fsOn) return Promise.resolve();          /* already in fake-fs — no-op */
             fsRequestedElement = this;                   /* remember what player asked for */
-            try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
+            /* Delegate fullscreen capability so top frame can call real requestFullscreen
+   (Chrome Capability Delegation, since 109). Falls back to plain postMessage
+   if browser doesn't support delegation. */
+try { window.top.postMessage({ type: 'SS_FS_REQ' }, { targetOrigin: '*', delegate: 'fullscreen' }); }
+catch (_) { try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (__) {} }
             return new Promise(function (resolve) {
                 pendingResolve = resolve;
                 setTimeout(function () {
@@ -386,7 +410,11 @@
             if (!isActive()) return origWEFS.apply(this, arguments);
             if (fsOn) return;
             fsRequestedElement = this;
-            try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
+            /* Delegate fullscreen capability so top frame can call real requestFullscreen
+   (Chrome Capability Delegation, since 109). Falls back to plain postMessage
+   if browser doesn't support delegation. */
+try { window.top.postMessage({ type: 'SS_FS_REQ' }, { targetOrigin: '*', delegate: 'fullscreen' }); }
+catch (_) { try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (__) {} }
         };
     }
 })();
