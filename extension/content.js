@@ -304,7 +304,13 @@ function makeDraggable(el, handle) {
         e.preventDefault();
         const r = el.getBoundingClientRect();
         el.style.left = r.left + 'px'; el.style.top = r.top + 'px';
-        el.style.bottom = 'auto'; el.style.right = 'auto'; el.style.transform = 'none';
+        el.style.bottom = 'auto'; el.style.right = 'auto';
+        /* For dock: keep its `translateX(var(--ss-dx))` transform intact and
+           just zero the variable. The hidden-state CSS uses the same var, so
+           hide/show animation stays purely vertical regardless of position.
+           Other draggables don't use the var and just clear transform. */
+        if (el.id === 'ss-dock') el.style.setProperty('--ss-dx', '0px');
+        else                     el.style.transform = 'none';
         ox = e.clientX; oy = e.clientY; startL = r.left; startT = r.top;
         handle.style.cursor = 'grabbing';
         const onMove = (e) => {
@@ -880,7 +886,7 @@ function injectUI() {
     style.textContent = `
         @keyframes ss-fadein { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:none; } }
         #ss-dock { transition: opacity 0.35s ease, transform 0.35s ease; }
-        #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(-50%) translateY(14px) !important; pointer-events:none !important; }
+        #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(var(--ss-dx,-50%)) translateY(14px) !important; pointer-events:none !important; }
         #ss-msgs::-webkit-scrollbar { width:3px; }
         #ss-msgs::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:4px; }
         body:fullscreen iframe[data-ss-fs],
@@ -895,7 +901,7 @@ function injectUI() {
     // ── DOCK ─────────────────────────────────────────────────────────────────
     const dock = document.createElement('div');
     dock.id = 'ss-dock';
-    dock.style.cssText = 'position:absolute;bottom:24px;left:50%;transform:translateX(-50%);padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
+    dock.style.cssText = 'position:absolute;bottom:24px;left:50%;transform:translateX(var(--ss-dx,-50%));padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
 
     const mkBtn = (emoji, id, handler, tip) => {
         const b = document.createElement('button');
