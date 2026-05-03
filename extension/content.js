@@ -1120,22 +1120,35 @@ function injectUI() {
         });
     } catch (_) {} finally { _ssRestoring = false; }
 
-    // Chat footer (input + emoji + send) with emoji popover
-    const chatFooter = document.createElement('div');
-    chatFooter.style.cssText = 'padding:10px 12px;display:flex;gap:6px;align-items:center;border-top:1px solid rgba(255,255,255,0.06);position:relative;flex-shrink:0;';
+    // ── REACTIONS ROW (always visible, screen-wide animated) ────────────────
+    const reactionsRow = document.createElement('div');
+    reactionsRow.id = 'ss-reactions-row';
+    reactionsRow.style.cssText = 'padding:8px 14px 6px;display:flex;justify-content:space-around;align-items:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;';
+    const REACTIONS = ['🥰','😡','😭','😂','🥳','🔥'];
+    REACTIONS.forEach(em => {
+        const rb = document.createElement('button');
+        rb.textContent = em;
+        rb.title = 'Send reaction';
+        rb.style.cssText = 'background:none;border:none;font-size:22px;cursor:pointer;padding:4px 6px;border-radius:50%;transition:transform 0.15s,background 0.15s;line-height:1;';
+        rb.onmouseenter = () => { rb.style.transform = 'scale(1.25)'; rb.style.background = 'rgba(255,255,255,0.08)'; };
+        rb.onmouseleave = () => { rb.style.transform = 'scale(1)'; rb.style.background = 'none'; };
+        rb.onclick = (e) => {
+            e.stopPropagation();
+            chrome.runtime.sendMessage({ type: 'REACTION', emoji: em });
+        };
+        reactionsRow.appendChild(rb);
+    });
+    panel.appendChild(reactionsRow);
 
-    const emojiBtn = document.createElement('button');
-    emojiBtn.textContent = '😀';
-    emojiBtn.title = 'Reactions';
-    emojiBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.15s;';
-    emojiBtn.onmouseenter = () => { emojiBtn.style.background = 'rgba(255,255,255,0.18)'; };
-    emojiBtn.onmouseleave = () => { emojiBtn.style.background = 'rgba(255,255,255,0.08)'; };
+    // ── INPUT ROW ────────────────────────────────────────────────────────────
+    const inputRow = document.createElement('div');
+    inputRow.style.cssText = 'padding:8px 12px;display:flex;gap:6px;align-items:center;flex-shrink:0;position:relative;';
 
     const chatInput = document.createElement('input');
     chatInput.id = 'ss-chat-in';
     chatInput.placeholder = 'Type a message...';
     chatInput.autocomplete = 'off';
-    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;min-width:0;';
+    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 14px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;min-width:0;';
     chatInput.onfocus = () => chatInput.style.borderColor = '#6366f1';
     chatInput.onblur  = () => chatInput.style.borderColor = 'rgba(255,255,255,0.08)';
 
@@ -1146,10 +1159,9 @@ function injectUI() {
     sendBtn.onmouseenter = () => { sendBtn.style.background='#4f46e5'; sendBtn.style.transform='scale(1.08)'; };
     sendBtn.onmouseleave = () => { sendBtn.style.background='#6366f1'; sendBtn.style.transform='scale(1)'; };
 
-    chatFooter.appendChild(emojiBtn);
-    chatFooter.appendChild(chatInput);
-    chatFooter.appendChild(sendBtn);
-    panel.appendChild(chatFooter);
+    inputRow.appendChild(chatInput);
+    inputRow.appendChild(sendBtn);
+    panel.appendChild(inputRow);
 
     const sendMessage = () => {
         const text = chatInput.value.trim();
@@ -1159,52 +1171,101 @@ function injectUI() {
     chatInput.addEventListener('keydown',  e => e.stopPropagation());
     chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
 
-    // Emoji popover (anchored above the emoji button)
-    const emojiPop = document.createElement('div');
-    emojiPop.id = 'ss-emoji-pop';
-    emojiPop.style.cssText = 'position:absolute;bottom:54px;left:8px;background:rgba(20,20,30,0.97);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:6px;display:none;gap:2px;z-index:5;box-shadow:0 4px 20px rgba(0,0,0,0.5);animation:ss-pop 0.18s ease;';
-    const emojiLabels = { '❤️': 'Love', '😂': 'Haha', '🔥': 'Fire', '😮': 'Wow', '👏': 'Clap' };
-    ['❤️','😂','🔥','😮','👏'].forEach(em => {
+    // ── CHAT EMOJI PICKER (separate from reactions — these get inserted
+    //    into the text input, not broadcast as a flying reaction) ──────────
+    const emojiPicker = document.createElement('div');
+    emojiPicker.id = 'ss-emoji-picker';
+    emojiPicker.style.cssText = 'position:absolute;bottom:48px;right:8px;width:240px;max-height:200px;overflow-y:auto;background:rgba(20,20,30,0.98);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:8px;display:none;grid-template-columns:repeat(7,1fr);gap:2px;z-index:5;box-shadow:0 4px 20px rgba(0,0,0,0.6);animation:ss-pop 0.18s ease;';
+    const CHAT_EMOJIS = [
+        '😀','😃','😄','😁','😆','😅','🤣',
+        '😂','🙂','😉','😊','😇','🥰','😍',
+        '🤩','😘','😗','😋','😛','😜','🤪',
+        '😎','🤓','🧐','🤔','🤨','😐','😑',
+        '😶','🙄','😏','😒','😔','😪','😴',
+        '🤤','😵','🤯','🥳','😎','🤠','🥸',
+        '😢','😭','😱','😨','😰','😥','😓',
+        '🤗','🤭','🤫','😬','🙃','😡','🤬',
+        '👍','👎','👏','🙏','💪','✊','🤝',
+        '❤️','💔','💖','💯','🔥','✨','⭐',
+        '🎉','🎊','🎁','🎂','☕','🍕','🍔',
+        '🎬','🎵','🎮','⚽','🏆','💡','✅'
+    ];
+    CHAT_EMOJIS.forEach(em => {
         const eb = document.createElement('button');
         eb.textContent = em;
-        eb.title = emojiLabels[em];
-        eb.style.cssText = 'background:none;border:none;font-size:18px;cursor:pointer;padding:6px 8px;border-radius:50%;transition:background 0.15s,transform 0.15s;';
-        eb.onclick = (e) => {
-            e.stopPropagation();
-            chrome.runtime.sendMessage({ type: 'REACTION', emoji: em });
-            emojiPop.style.display = 'none';
+        eb.style.cssText = 'background:none;border:none;font-size:18px;cursor:pointer;padding:5px;border-radius:6px;transition:background 0.12s,transform 0.12s;line-height:1;';
+        eb.onmouseenter = () => { eb.style.background = 'rgba(255,255,255,0.12)'; eb.style.transform = 'scale(1.18)'; };
+        eb.onmouseleave = () => { eb.style.background = 'none'; eb.style.transform = 'scale(1)'; };
+        eb.onclick = (ev) => {
+            ev.stopPropagation();
+            // Insert at cursor position, keep input focused
+            const start = chatInput.selectionStart || chatInput.value.length;
+            const end   = chatInput.selectionEnd   || chatInput.value.length;
+            chatInput.value = chatInput.value.slice(0, start) + em + chatInput.value.slice(end);
+            chatInput.focus();
+            chatInput.setSelectionRange(start + em.length, start + em.length);
         };
-        emojiPop.appendChild(eb);
+        emojiPicker.appendChild(eb);
     });
-    chatFooter.appendChild(emojiPop);
+    inputRow.appendChild(emojiPicker);
 
-    emojiBtn.onclick = (e) => {
-        e.stopPropagation();
-        emojiPop.style.display = emojiPop.style.display === 'flex' ? 'none' : 'flex';
-    };
-    document.addEventListener('click', (e) => {
-        if (emojiPop.style.display === 'flex' && !emojiPop.contains(e.target) && e.target !== emojiBtn) {
-            emojiPop.style.display = 'none';
-        }
-    });
+    // ── BOTTOM CONTROLS ROW ──────────────────────────────────────────────────
+    //   Left:  📷 🎤 🖥  (media toggles)
+    //   Right: 😊 GIF 🎉 (chat emoji picker, GIF, quick-react)
+    const bottomRow = document.createElement('div');
+    bottomRow.style.cssText = 'padding:6px 12px 10px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
 
-    // Controls row (mic / cam / screen) at the bottom
-    const ctrlRow = document.createElement('div');
-    ctrlRow.style.cssText = 'padding:10px 14px 12px;display:flex;gap:10px;justify-content:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;';
+    const leftCtrls = document.createElement('div');
+    leftCtrls.style.cssText = 'display:flex;gap:4px;align-items:center;';
+    const rightCtrls = document.createElement('div');
+    rightCtrls.style.cssText = 'display:flex;gap:4px;align-items:center;';
 
-    const mkCtrlBtn = (emoji, id, handler, tip) => {
+    const mkSmallBtn = (content, id, handler, tip, opts) => {
         const b = document.createElement('button');
-        b.id = id; b.innerHTML = emoji; b.title = tip || '';
-        b.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:42px;height:42px;border-radius:50%;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:background 0.15s,transform 0.15s;';
-        b.onmouseenter = () => { b.style.transform='scale(1.1)'; b.style.background='rgba(255,255,255,0.18)'; };
-        b.onmouseleave = () => { b.style.transform='scale(1)'; updateButtons(); };
+        if (id) b.id = id;
+        b.innerHTML = content; b.title = tip || '';
+        const o = opts || {};
+        b.style.cssText = `background:${o.bg || 'rgba(255,255,255,0.06)'};border:none;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.15s,transform 0.12s;flex-shrink:0;`;
+        b.onmouseenter = () => { if (!o.disabled) b.style.background = 'rgba(255,255,255,0.16)'; b.style.transform='scale(1.08)'; };
+        b.onmouseleave = () => { b.style.transform='scale(1)'; if (id) updateButtons(); else b.style.background = o.bg || 'rgba(255,255,255,0.06)'; };
         b.onclick = (e) => { e.stopPropagation(); handler(); };
         return b;
     };
-    ctrlRow.appendChild(mkCtrlBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },  'Mic (Alt+M)'));
-    ctrlRow.appendChild(mkCtrlBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },  'Camera (Alt+C)'));
-    ctrlRow.appendChild(mkCtrlBtn('🖥', 'ss-b-screen', () => toggleScreenShare(),                     'Screen (Alt+S)'));
-    panel.appendChild(ctrlRow);
+
+    leftCtrls.appendChild(mkSmallBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },  'Camera (Alt+C)'));
+    leftCtrls.appendChild(mkSmallBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },  'Mic (Alt+M)'));
+    leftCtrls.appendChild(mkSmallBtn('🖥', 'ss-b-screen', () => toggleScreenShare(),                     'Screen (Alt+S)'));
+
+    // Chat emoji picker toggle
+    const emojiBtn = mkSmallBtn('😊', null, () => {
+        const open = emojiPicker.style.display !== 'grid';
+        emojiPicker.style.display = open ? 'grid' : 'none';
+        if (open) chatInput.focus();
+    }, 'Insert emoji');
+
+    // GIF placeholder (visible for design parity; actual Tenor integration is a future task)
+    const gifBtn = mkSmallBtn('<span style="font-size:9px;font-weight:700;letter-spacing:0.04em;">GIF</span>', null,
+        () => { showToast('GIF picker coming soon', '#6366f1'); }, 'GIFs (coming soon)');
+    gifBtn.style.opacity = '0.55';
+
+    // Quick-reaction shortcut: sends 🎉
+    const partyBtn = mkSmallBtn('🎉', null,
+        () => { chrome.runtime.sendMessage({ type: 'REACTION', emoji: '🎉' }); }, 'Send 🎉 reaction');
+
+    rightCtrls.appendChild(emojiBtn);
+    rightCtrls.appendChild(gifBtn);
+    rightCtrls.appendChild(partyBtn);
+
+    bottomRow.appendChild(leftCtrls);
+    bottomRow.appendChild(rightCtrls);
+    panel.appendChild(bottomRow);
+
+    // Click outside emoji picker to close it
+    document.addEventListener('click', (e) => {
+        if (emojiPicker.style.display === 'grid' && !emojiPicker.contains(e.target) && e.target !== emojiBtn) {
+            emojiPicker.style.display = 'none';
+        }
+    });
 
     // ── PANEL TOGGLE ─────────────────────────────────────────────────────────
     const toggle = document.createElement('div');
