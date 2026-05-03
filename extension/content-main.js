@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'DOCK-MOUSE-2026-05-04';
+    window.__ssFSVersion = 'BANNER-HIDE-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -30,8 +30,9 @@
 
     /* ── TOP FRAME ─────────────────────────────────────────────────────── */
     if (window === window.top) {
-        var fakeEl   = null;
-        var savedAnc = null;
+        var fakeEl     = null;
+        var savedAnc   = null;
+        var savedBody  = null;  /* hidden body-level siblings during fake-fs */
 
         /* Capture original requestFullscreen on HTMLElement BEFORE we patch it,
            so we can call it bypassing our own intercept (used to enter real
@@ -163,6 +164,31 @@
                 node = node.parentElement;
             }
 
+            /* Hide site-level overlays (nav bars, banners) at the body level so
+               they can't paint above the iframe. We only touch direct body
+               children that are NOT in the iframe's path and NOT ss-root. The
+               iframe's wrapper chain stays visible; ss-root stays visible. */
+            savedBody = [];
+            if (document.body) {
+                var topAncestor = fr;
+                while (topAncestor.parentElement && topAncestor.parentElement !== document.body) {
+                    topAncestor = topAncestor.parentElement;
+                }
+                if (topAncestor.parentElement === document.body) {
+                    Array.prototype.forEach.call(document.body.children, function (child) {
+                        if (child === topAncestor) return;
+                        if (child.id === 'ss-root') return;
+                        if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE') return;
+                        savedBody.push({
+                            el: child,
+                            v:  child.style.getPropertyValue('display'),
+                            pri: child.style.getPropertyPriority('display')
+                        });
+                        child.style.setProperty('display', 'none', 'important');
+                    });
+                }
+            }
+
             bumpSsRoot();
             try { fr.contentWindow.postMessage({ type: 'SS_FS_ON' }, '*'); } catch (_) {}
         }
@@ -180,6 +206,14 @@
                     });
                 });
                 savedAnc = null;
+            }
+            /* Restore body-level siblings */
+            if (savedBody) {
+                savedBody.forEach(function (r) {
+                    if (r.v) r.el.style.setProperty('display', r.v, r.pri);
+                    else     r.el.style.removeProperty('display');
+                });
+                savedBody = null;
             }
             /* Exit real browser fullscreen too (if we entered it) */
             if (document.fullscreenElement === document.documentElement) {
