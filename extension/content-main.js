@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'BANNER-HIDE-2026-05-04';
+    window.__ssFSVersion = 'INNERHTML-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -323,6 +323,56 @@
             } catch (_) {}
             return el;
         };
+
+        /* a2) innerHTML / outerHTML / insertAdjacentHTML intercept — for sites
+           like webteizle.xyz that build iframes via $("#embed").html('<iframe ...>')
+           (jQuery uses native innerHTML, browser parses + initiates navigation
+           in one step; our MutationObserver fires too late to set allow before
+           the Permissions Policy is locked in). We rewrite the HTML string to
+           include allow="fullscreen *" before the parser sees it. */
+        function injectAllowInHTML(html) {
+            if (typeof html !== 'string' || html.indexOf('<iframe') === -1) return html;
+            return html.replace(/<iframe(\s[^>]*)?>/gi, function (full, attrs) {
+                attrs = attrs || '';
+                var hasAllow = /\sallow\s*=/i.test(attrs);
+                var hasAllowFs = /\sallowfullscreen\b/i.test(attrs);
+                if (hasAllow) {
+                    /* Already has allow; ensure it includes fullscreen */
+                    var m = attrs.match(/\sallow\s*=\s*(["'])([^"']*)\1/i);
+                    if (m && m[2].indexOf('fullscreen') === -1) {
+                        attrs = attrs.replace(/\sallow\s*=\s*(["'])([^"']*)\1/i,
+                            ' allow=' + m[1] + m[2] + '; fullscreen *' + m[1]);
+                    }
+                } else {
+                    attrs += ' allow="fullscreen *"';
+                }
+                if (!hasAllowFs) attrs += ' allowfullscreen';
+                return '<iframe' + attrs + '>';
+            });
+        }
+
+        var iHDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+        if (iHDesc && iHDesc.set) {
+            Object.defineProperty(Element.prototype, 'innerHTML', {
+                configurable: true,
+                get: iHDesc.get,
+                set: function (html) { iHDesc.set.call(this, injectAllowInHTML(html)); }
+            });
+        }
+        var oHDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'outerHTML');
+        if (oHDesc && oHDesc.set) {
+            Object.defineProperty(Element.prototype, 'outerHTML', {
+                configurable: true,
+                get: oHDesc.get,
+                set: function (html) { oHDesc.set.call(this, injectAllowInHTML(html)); }
+            });
+        }
+        var origIAH = Element.prototype.insertAdjacentHTML;
+        if (origIAH) {
+            Element.prototype.insertAdjacentHTML = function (pos, html) {
+                return origIAH.call(this, pos, injectAllowInHTML(html));
+            };
+        }
 
         /* c) initial + observer */
         function sweepIframes() {
