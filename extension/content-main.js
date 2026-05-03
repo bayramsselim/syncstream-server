@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'STYLESHEET-2026-05-04';
+    window.__ssFSVersion = 'FSEL-FIX-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -253,8 +253,14 @@
     }
 
     /* ── IFRAME ─────────────────────────────────────────────────────────── */
-    var fsOn           = false;
-    var pendingResolve = null;
+    var fsOn              = false;
+    var pendingResolve    = null;
+    var fsRequestedElement = null;  /* what the player called requestFullscreen on,
+                                       so document.fullscreenElement returns the
+                                       same element the player expects (not
+                                       documentElement, which makes the player
+                                       think fullscreen failed and immediately
+                                       call exitFullscreen). */
 
     function broadcastDown(msg) {
         document.querySelectorAll('iframe').forEach(function (fr) {
@@ -297,6 +303,7 @@
             broadcastDown(e.data);
             if (fsOn) {
                 fsOn = false;
+                fsRequestedElement = null;
                 try { document.dispatchEvent(new Event('fullscreenchange')); } catch (_) {}
                 try { document.dispatchEvent(new Event('webkitfullscreenchange')); } catch (_) {}
             }
@@ -307,7 +314,10 @@
         if (e.key === 'Escape' && fsOn) fakeExit();
     });
 
-    /* Fake document.fullscreenElement */
+    /* Fake document.fullscreenElement — return the element the player itself
+       requested. Returning documentElement instead made players check
+       `document.fullscreenElement === requestedEl`, see false, conclude
+       fullscreen failed, and call exitFullscreen on us. */
     ['fullscreenElement', 'webkitFullscreenElement', 'mozFullScreenElement'].forEach(function (prop) {
         var d = Object.getOwnPropertyDescriptor(Document.prototype, prop) ||
                 Object.getOwnPropertyDescriptor(document, prop);
@@ -315,7 +325,10 @@
         var origGet = d.get || function () { return null; };
         try {
             Object.defineProperty(document, prop, {
-                get: function () { return fsOn ? document.documentElement : origGet.call(this); },
+                get: function () {
+                    if (!fsOn) return origGet.call(this);
+                    return fsRequestedElement || document.documentElement;
+                },
                 configurable: true
             });
         } catch (_) {}
@@ -354,6 +367,7 @@
         HTMLElement.prototype[k] = function () {
             if (!isActive()) return orig.apply(this, arguments);
             if (fsOn) return Promise.resolve();          /* already in fake-fs — no-op */
+            fsRequestedElement = this;                   /* remember what player asked for */
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
             return new Promise(function (resolve) {
                 pendingResolve = resolve;
@@ -370,7 +384,8 @@
     if (origWEFS) {
         HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
             if (!isActive()) return origWEFS.apply(this, arguments);
-            if (fsOn) return;  /* same no-op as above */
+            if (fsOn) return;
+            fsRequestedElement = this;
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
         };
     }
