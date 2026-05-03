@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'DELEGATE-2026-05-04';
+    window.__ssFSVersion = 'ALLOW-FS-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -132,8 +132,11 @@
                If it fails (no activation, unsupported browser, etc.) the CSS
                fake-fs below still gives a viewport-sized video. */
             if (ORIG_RFS) {
-                try { ORIG_RFS.call(document.documentElement).catch(function(){}); }
-                catch (_) {}
+                try {
+                    ORIG_RFS.call(document.documentElement)
+                        .then(function(){ console.log('[SS-FS] real FS ✓'); })
+                        .catch(function(e){ console.log('[SS-FS] real FS ✗', e && e.message); });
+                } catch (_) {}
             }
 
             /* Apply visual state via attribute → stylesheet rules with
@@ -255,6 +258,52 @@
                 try { fr.contentWindow.postMessage(msg, '*'); } catch (_) {}
             });
         }
+        /* Force fullscreen permission on every iframe: ensures Chrome's
+           Capability Delegation can succeed across cross-origin iframes (some
+           sites only set the legacy `allowfullscreen` boolean attribute, which
+           grants fullscreen but not necessarily the delegation capability).
+           Three layers:
+             a) document.createElement intercept — catches iframes created via JS
+                BEFORE they're attached and navigate, so allow is on element when
+                browser sets up permission policy.
+             b) MutationObserver — catches iframes from innerHTML / templates.
+             c) Initial sweep + interval — catches anything we missed. */
+        function ensureFullscreenAllowed(fr) {
+            if (!fr || fr.tagName !== 'IFRAME') return;
+            var allow = fr.getAttribute('allow') || '';
+            if (allow.indexOf('fullscreen') === -1) {
+                fr.setAttribute('allow', (allow ? allow + '; ' : '') + 'fullscreen *');
+            }
+            if (!fr.hasAttribute('allowfullscreen')) fr.setAttribute('allowfullscreen', '');
+        }
+
+        /* a) createElement intercept */
+        var origCreateElement = Document.prototype.createElement;
+        Document.prototype.createElement = function (tag) {
+            var el = origCreateElement.apply(this, arguments);
+            try {
+                if (typeof tag === 'string' && tag.toLowerCase() === 'iframe') {
+                    el.setAttribute('allow', 'fullscreen *');
+                    el.setAttribute('allowfullscreen', '');
+                }
+            } catch (_) {}
+            return el;
+        };
+
+        /* c) initial + observer */
+        function sweepIframes() {
+            document.querySelectorAll('iframe').forEach(ensureFullscreenAllowed);
+        }
+        sweepIframes();
+        new MutationObserver(function (muts) {
+            muts.forEach(function (m) {
+                m.addedNodes && m.addedNodes.forEach(function (n) {
+                    if (n.tagName === 'IFRAME') ensureFullscreenAllowed(n);
+                    if (n.querySelectorAll) n.querySelectorAll('iframe').forEach(ensureFullscreenAllowed);
+                });
+            });
+        }).observe(document.documentElement, { childList: true, subtree: true });
+
         /* Reply to iframes asking on init (avoids 1.5s broadcast race). */
         window.addEventListener('message', function (e) {
             if (!e.data || e.data.type !== 'SS_ASK') return;
