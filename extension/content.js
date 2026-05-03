@@ -166,18 +166,27 @@ function applyRemoteSync(msg) {
     const diff = Math.abs(videoElement.currentTime - msg.time);
     const wasPaused = videoElement.paused;
 
+    // If the difference is negligible, don't trigger a seek (prevents micro-loops)
+    if (msg.event === 'seek' && diff < 0.2) {
+        isSyncing = false;
+        return;
+    }
+
     if (msg.event === 'pause') {
-        videoElement.currentTime = msg.time; // exact timestamp — no drift on pause
+        videoElement.currentTime = msg.time; 
         if (!videoElement.paused) videoElement.pause();
     } else if (msg.event === 'play') {
-        if (diff > 0.3) videoElement.currentTime = msg.time;
+        if (diff > 0.5) videoElement.currentTime = msg.time;
         if (videoElement.paused) videoElement.play().catch(() => {});
-    } else if (msg.event === 'seek' || diff > 0.3) {
+    } else if (msg.event === 'seek' || diff > 0.5) {
         videoElement.currentTime = msg.time;
     }
 
     if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
-    setTimeout(() => { isSyncing = false; }, 150); // 500→150ms: unlock faster
+    
+    // Increased lock time from 150ms to 800ms to allow the video player 
+    // to finish buffering and firing its own events before we listen again.
+    setTimeout(() => { isSyncing = false; }, 800); 
 
     // Add a system event line in chat (Netflix Party style):
     //   "Selim paused the video at 1:37"
@@ -1337,6 +1346,27 @@ function injectUI() {
     };
     ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
     resetAway();
+
+    // ── HEARTBEAT (Keeps background worker and tab alive) ────────────────────
+    setInterval(() => {
+        if (roomState?.roomId) {
+            chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
+        }
+    }, 30000);
+
+    // ── VISIBILITY DETECTION (Re-sync when tab is back in focus) ─────────────
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && roomState?.roomId) {
+            // Re-request latest room state and now playing info
+            chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
+                if (res?.roomId) {
+                    roomState = res;
+                    updateParticipantPanel();
+                    syncAvatarTiles(res.users || []);
+                }
+            });
+        }
+    });
 }
 
 // ─── MAIN LOOP ─────────────────────────────────────────────────────────────────

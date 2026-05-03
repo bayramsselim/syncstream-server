@@ -2,7 +2,7 @@ let socket = null;
 let currentRoom = null;
 let reconnectTimer = null;
 let isConnecting = false;
-let contentTabId = null; // tab where content script is active
+let roomTabs = new Set(); // Set of tab IDs that have the content script active
 
 const SERVER_URL = 'wss://syncstream-server.onrender.com';
 
@@ -14,13 +14,18 @@ chrome.storage.local.get(['roomData'], (result) => {
     }
 });
 
-// ─── KEEP-ALIVE via chrome.alarms (reliable across MV3 service worker sleeps) ─
-chrome.alarms.create('keepAlive', { periodInMinutes: 4 });
+// ─── KEEP-ALIVE ───────────────────────────────────────────────────────────────
+chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'keepAlive') {
+        // Ping server health endpoint
         fetch('https://syncstream-server.onrender.com/health').catch(() => {});
-        // Reconnect if socket died while worker was sleeping
-        if (!socket || socket.readyState === WebSocket.CLOSED) connectWebSocket();
+        
+        // Reconnect if socket died
+        if (!socket || socket.readyState === WebSocket.CLOSED) {
+            console.log('[SyncStream] Alarm: Socket closed, reconnecting...');
+            connectWebSocket();
+        }
     }
 });
 
@@ -39,8 +44,13 @@ function connectWebSocket() {
         console.log('[SyncStream] Connected');
         broadcastToPopup({ type: 'CONNECTION_STATUS', connected: true, connecting: false });
         broadcastToTabs({ type: 'CONNECTION_STATUS', connected: true, connecting: false });
+        
         if (currentRoom?.roomId) {
-            socket.send(JSON.stringify({ type: 'JOIN_ROOM', roomId: currentRoom.roomId, username: currentRoom.myUsername }));
+            socket.send(JSON.stringify({ 
+                type: 'JOIN_ROOM', 
+                roomId: currentRoom.roomId, 
+                username: currentRoom.myUsername 
+            }));
         }
     };
 
@@ -50,14 +60,10 @@ function connectWebSocket() {
             if (data.type === 'ROOM_UPDATE') {
                 const me = data.users.find(u => u.username === currentRoom?.myUsername);
                 currentRoom = {
-                    roomId:          data.roomId,
-                    users:           data.users,
-                    hostControlOnly: data.hostControlOnly,
-                    myUsername:      currentRoom?.myUsername,
-                    myId:            me?.id || currentRoom?.myId,
-                    isHost:          me?.isHost || false,
-                    nowPlaying:      data.nowPlaying    || currentRoom?.nowPlaying,
-                    nowPlayingUrl:   data.nowPlayingUrl || currentRoom?.nowPlayingUrl || ''
+                    ...data,
+                    myUsername: currentRoom?.myUsername,
+                    myId: me?.id || currentRoom?.myId,
+                    isHost: me?.isHost || false
                 };
                 chrome.storage.local.set({ roomData: currentRoom });
                 const roomMsg = { type: 'ROOM_STATE', data: currentRoom };
@@ -65,51 +71,72 @@ function connectWebSocket() {
                 broadcastToTabs(roomMsg);
             }
             else if (data.type === 'NOW_PLAYING') {
-                if (currentRoom) { currentRoom.nowPlaying = data.title; currentRoom.nowPlayingUrl = data.url || ''; broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom }); }
+                if (currentRoom) { 
+                    currentRoom.nowPlaying = data.title; 
+                    currentRoom.nowPlayingUrl = data.url || ''; 
+                    broadcastToPopup({ type: 'ROOM_STATE', data: currentRoom }); 
+                }
                 broadcastToTabs(data);
             }
             else if (data.type === 'ERROR') {
                 broadcastToPopup({ type: 'JOIN_ERROR', message: data.message });
                 broadcastToTabs({ type: 'JOIN_ERROR', message: data.message });
-                // If this was a stale room reconnect, clear the stored data
-                chrome.storage.local.get(['roomData'], (res) => {
-                    if (res.roomData) {
-                        chrome.storage.local.remove('roomData');
-                        currentRoom = null;
-                    }
-                });
+                if (data.message.toLowerCase().includes('not found')) {
+                    chrome.storage.local.remove('roomData');
+                    currentRoom = null;
+                }
             }
-            else { broadcastToTabs(data); }
-        } catch (e) { console.error('[SyncStream] Message error:', e); }
+            else { 
+                broadcastToTabs(data); 
+            }
+        } catch (e) { console.error('[SyncStream] WS Message error:', e); }
     };
 
     socket.onclose = () => {
         isConnecting = false;
         console.log('[SyncStream] Disconnected');
         broadcastToPopup({ type: 'CONNECTION_STATUS', connected: false, connecting: false });
-        if (currentRoom?.roomId) broadcastToTabs({ type: 'RECONNECTING', seconds: 4 });
+        if (currentRoom?.roomId) broadcastToTabs({ type: 'RECONNECTING', seconds: 3 });
+        
         clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connectWebSocket, 4000);
+        reconnectTimer = setTimeout(connectWebSocket, 3000);
     };
 
-    socket.onerror = () => { isConnecting = false; };
+    socket.onerror = (e) => { 
+        isConnecting = false;
+        console.error('[SyncStream] WS Error:', e);
+    };
 }
 
 function broadcastToTabs(msg) {
-    chrome.tabs.query({}, (tabs) => {
-        tabs.forEach(tab => chrome.tabs.sendMessage(tab.id, msg).catch(() => {}));
+    // Send to all tabs that we know have the content script
+    roomTabs.forEach(tabId => {
+        chrome.tabs.sendMessage(tabId, msg).catch(() => {
+            // If message fails, tab might be closed or navigated away
+            roomTabs.delete(tabId);
+        });
     });
 }
 
 function broadcastToPopup(msg) {
-    chrome.runtime.sendMessage(msg).catch(() => {});
+    chrome.runtime.sendMessage(msg).catch(() => {
+        // Popup is likely closed, ignore
+    });
 }
 
-// ─── TAB NAVIGATION DETECTION ─────────────────────────────────────────────────
+// ─── TAB MANAGEMENT ───────────────────────────────────────────────────────────
+chrome.tabs.onRemoved.addListener((tabId) => {
+    roomTabs.delete(tabId);
+});
+
+// Detect URL changes to trigger HOST_NAVIGATE
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (tabId !== contentTabId || !changeInfo.url || !currentRoom?.roomId) return;
+    if (!roomTabs.has(tabId) || !changeInfo.url || !currentRoom?.roomId) return;
+    
+    // Only the host (in their primary tab) can trigger room navigation
     const canNavigate = currentRoom.isHost || !currentRoom.hostControlOnly;
     if (!canNavigate) return;
+
     if (socket?.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({
             type: 'HOST_NAVIGATE',
@@ -122,7 +149,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 // ─── MESSAGE HANDLER ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-    if (sender?.tab?.id) contentTabId = sender.tab.id;
+    // Register the tab if it's sending a message
+    if (sender?.tab?.id) {
+        roomTabs.add(sender.tab.id);
+    }
+
     if (request.type === 'GET_ROOM_STATE') {
         sendResponse(currentRoom);
     }
@@ -136,7 +167,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             socket.send(payload);
         } else {
             connectWebSocket();
-            const sendOnOpen = () => { socket.send(payload); socket.removeEventListener('open', sendOnOpen); };
+            const sendOnOpen = () => { 
+                if (socket.readyState === WebSocket.OPEN) socket.send(payload); 
+                socket.removeEventListener('open', sendOnOpen); 
+            };
             socket.addEventListener('open', sendOnOpen);
         }
     }
@@ -144,6 +178,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'LEAVE_ROOM' }));
         currentRoom = null;
         chrome.storage.local.remove('roomData');
+        broadcastToTabs({ type: 'ROOM_STATE', data: null });
     }
     else if (request.type === 'TOGGLE_HOST_CONTROL') {
         if (socket?.readyState === WebSocket.OPEN && currentRoom?.roomId) {
