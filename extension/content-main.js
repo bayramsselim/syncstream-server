@@ -189,20 +189,11 @@
             var orig = HTMLElement.prototype[k];
             if (!orig) return;
             HTMLElement.prototype[k] = function () {
-                console.log('[SS-FS] L1 top-frame intercept:', this.tagName, 'id=', this.id, 'class=', this.className, 'isActive=', isActive());
                 if (!isActive()) return orig.apply(this, arguments);
-                if (this.tagName === 'IFRAME') {
-                    console.log('[SS-FS] L1: target IS iframe → fake-fs');
-                    enterFake(this);
-                    return Promise.resolve();
-                }
+                if (this.tagName === 'IFRAME') { enterFake(this); return Promise.resolve(); }
                 var inner = dominantIframe(this);
-                if (inner) {
-                    console.log('[SS-FS] L1: dominant iframe found → fake-fs');
-                    enterFake(inner);
-                    return Promise.resolve();
-                }
-                console.log('[SS-FS] L1: no dominant iframe → REAL fullscreen (YouTube path)');
+                if (inner) { enterFake(inner); return Promise.resolve(); }
+                /* No dominant iframe → real fullscreen (YouTube/Vimeo in-page) */
                 return orig.apply(this, arguments);
             };
         });
@@ -211,9 +202,7 @@
         window.addEventListener('message', function (e) {
             if (!e.data || !isActive()) return;
             if (e.data.type === 'SS_FS_REQ') {
-                console.log('[SS-FS] L2 received SS_FS_REQ from iframe');
                 var fr = findFrameByWindow(e.source);
-                console.log('[SS-FS] L2: found iframe?', !!fr, fr);
                 if (fr) enterFake(fr);
             }
             else if (e.data.type === 'SS_FS_EXIT') { exitFake(); }
@@ -353,36 +342,35 @@
     try { Object.defineProperty(document, 'webkitExitFullscreen', { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
     try { Object.defineProperty(document, 'mozCancelFullScreen',  { value: fakeExit, writable: true, configurable: true }); } catch (_) {}
 
-    /* Intercept requestFullscreen */
+    /* Intercept requestFullscreen.
+       NOTE: when fsOn is already true, we MUST NOT treat the second call as
+       a toggle-off. Many players (hdfilmcehennemi's player, video.js with
+       certain plugins, etc.) call requestFullscreen a second time defensively
+       AFTER fullscreenchange to confirm/re-apply state. Treating that as an
+       exit caused the "enter then immediately exit" symptom. Just resolve. */
     function patchMethod(k) {
         var orig = HTMLElement.prototype[k];
         if (!orig) return;
         HTMLElement.prototype[k] = function () {
-            console.log('[SS-FS] iframe intercept:', this.tagName, 'isActive=', isActive(), 'msgActive=', msgActive, 'origin=', location.origin);
             if (!isActive()) return orig.apply(this, arguments);
-            if (fsOn) { fakeExit(); return Promise.resolve(); }
-            console.log('[SS-FS] iframe → posting SS_FS_REQ to top');
+            if (fsOn) return Promise.resolve();          /* already in fake-fs — no-op */
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
             return new Promise(function (resolve) {
                 pendingResolve = resolve;
                 setTimeout(function () {
-                    if (pendingResolve === resolve) {
-                        pendingResolve = null;
-                        console.log('[SS-FS] iframe: SS_FS_ON timeout — top frame did not respond');
-                        resolve();
-                    }
+                    if (pendingResolve === resolve) { pendingResolve = null; resolve(); }
                 }, 1000);
             });
         };
     }
     ['requestFullscreen','webkitRequestFullscreen','mozRequestFullScreen','msRequestFullscreen'].forEach(patchMethod);
 
-    /* webkitEnterFullscreen on video elements */
+    /* webkitEnterFullscreen on video elements (Safari path) */
     var origWEFS = HTMLVideoElement && HTMLVideoElement.prototype.webkitEnterFullscreen;
     if (origWEFS) {
         HTMLVideoElement.prototype.webkitEnterFullscreen = function () {
             if (!isActive()) return origWEFS.apply(this, arguments);
-            if (fsOn) { fakeExit(); return; }
+            if (fsOn) return;  /* same no-op as above */
             try { window.top.postMessage({ type: 'SS_FS_REQ' }, '*'); } catch (_) {}
         };
     }
