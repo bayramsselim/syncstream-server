@@ -1,10 +1,12 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
+const VERSION = '6char-codes-v2';
+
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/ping') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, uptime: process.uptime() }));
+        res.end(JSON.stringify({ status: 'ok', rooms: rooms.size, uptime: process.uptime(), version: VERSION }));
         return;
     }
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -20,7 +22,12 @@ const MAX_JOIN_TRIES = 8;    // brute-force: max failed join attempts per connec
 
 function randomId()    { return Math.random().toString(36).substring(2, 9); }
 function randomColor() { return `hsl(${Math.floor(Math.random() * 360)},70%,75%)`; }
-function randomRoomId(){ return Math.random().toString(36).substring(2, 6).toUpperCase(); }
+function randomRoomId() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    let id = '';
+    for (let i = 0; i < 6; i++) id += chars[Math.floor(Math.random() * chars.length)];
+    return id;
+}
 
 wss.on('connection', (ws) => {
     ws.id          = randomId();
@@ -28,8 +35,9 @@ wss.on('connection', (ws) => {
     ws.roomId      = null;
     ws.username    = null;
     ws.isInCall    = false;
-    ws.msgCount    = 0;       // rate limit counter (resets every second)
-    ws.joinTries   = 0;       // brute-force counter
+    ws.isAway      = false;
+    ws.msgCount    = 0;
+    ws.joinTries   = 0;
 
     // Reset rate-limit counter every second
     const rateLimitTimer = setInterval(() => { ws.msgCount = 0; }, 1000);
@@ -128,10 +136,39 @@ wss.on('connection', (ws) => {
                 broadcastRoomUpdate(ws.roomId);
             }
 
+            else if (data.type === 'USER_STATUS') {
+                ws.isAway = !!data.away;
+                broadcastRoomUpdate(ws.roomId);
+            }
+
+            else if (data.type === 'HOST_NAVIGATE') {
+                const room = rooms.get(ws.roomId);
+                if (room.hostControlOnly && ws.id !== room.host) return;
+                const url   = (data.url   || '').substring(0, 2000);
+                const title = (data.title || '').substring(0, 200);
+                
+                // Logic Fix: Persist navigation state so re-loaders get the right URL
+                room.nowPlaying = title;
+                room.nowPlayingUrl = url;
+
+                broadcastToRoom(ws.roomId, { type: 'HOST_NAVIGATE', url, title, username: ws.username }, ws);
+            }
+
             else if (data.type === 'UPDATE_NOW_PLAYING') {
                 const room = rooms.get(ws.roomId);
-                room.nowPlaying = (data.title || '').substring(0, 200);
-                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying }, null);
+                if (!room || ws.id !== room.host) return;
+
+                const newTitle = (data.title || '').substring(0, 200);
+                const newUrl   = (data.url   || '').substring(0, 500);
+
+                // Logic Fix: Only broadcast if something actually changed
+                if (room.nowPlaying === newTitle && room.nowPlayingUrl === newUrl) return;
+
+                room.nowPlaying    = newTitle;
+                room.nowPlayingUrl = newUrl;
+                
+                // Logic Fix: Exclude host from broadcast to prevent redundant state updates
+                broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying, url: room.nowPlayingUrl }, ws);
             }
         }
     });
@@ -158,11 +195,12 @@ function broadcastRoomUpdate(roomId) {
     if (!room) return;
     const users = Array.from(room.clients).map(c => ({
         id: c.id, username: c.username, color: c.color,
-        isHost: c.id === room.host, isInCall: c.isInCall || false
+        isHost: c.id === room.host, isInCall: c.isInCall || false, isAway: c.isAway || false
     }));
     broadcastToRoom(roomId, {
         type: 'ROOM_UPDATE', roomId,
-        users, hostControlOnly: room.hostControlOnly, nowPlaying: room.nowPlaying
+        users, hostControlOnly: room.hostControlOnly,
+        nowPlaying: room.nowPlaying, nowPlayingUrl: room.nowPlayingUrl || ''
     }, null);
 }
 
