@@ -853,12 +853,18 @@ function addChatMessage(user, text, color) {
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
-    try {
-        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.push({ kind: 'msg', user, text, color });
-        if (history.length > 200) history.shift();
-        sessionStorage.setItem('ss-chat', JSON.stringify(history));
-    } catch (_) {}
+    saveToPersistentHistory({ kind: 'msg', user, text, color });
+}
+
+function saveToPersistentHistory(item) {
+    if (!roomState?.roomId) return;
+    const key = `ss-chat-${roomState.roomId}`;
+    chrome.storage.local.get([key], (res) => {
+        const history = res[key] || [];
+        history.push(item);
+        if (history.length > 300) history.shift();
+        chrome.storage.local.set({ [key]: history });
+    });
 }
 
 // System events appear in the chat history (Netflix Party style):
@@ -884,12 +890,7 @@ function addSystemMessage(text, color, opts) {
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
-    try {
-        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.push({ kind: 'sys', actor: o.actor || '', text, color });
-        if (history.length > 200) history.shift();
-        sessionStorage.setItem('ss-chat', JSON.stringify(history));
-    } catch (_) {}
+    saveToPersistentHistory({ kind: 'sys', actor: o.actor || '', text, color });
 
     // Intentionally NO unread badge / no toggle flash / no sound — system events
     // are passive timeline entries, not actionable like chat messages. Only
@@ -1129,15 +1130,19 @@ function injectUI() {
     msgs.style.cssText = 'flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px;min-height:0;';
     panel.appendChild(msgs);
 
-    // Restore chat history (regular messages and system events)
-    try {
+    // Restore chat history from persistent storage
+    if (roomState?.roomId) {
         _ssRestoring = true;
-        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.forEach(m => {
-            if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor });
-            else                  addChatMessage(m.user, m.text, m.color);
+        const key = `ss-chat-${roomState.roomId}`;
+        chrome.storage.local.get([key], (res) => {
+            const history = res[key] || [];
+            history.forEach(m => {
+                if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor });
+                else                  addChatMessage(m.user, m.text, m.color);
+            });
+            _ssRestoring = false;
         });
-    } catch (_) {} finally { _ssRestoring = false; }
+    }
 
     // ── REACTIONS ROW (always visible, screen-wide animated) ────────────────
     const reactionsRow = document.createElement('div');
