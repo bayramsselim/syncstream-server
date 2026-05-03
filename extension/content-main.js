@@ -29,11 +29,54 @@
     /* ── TOP FRAME ─────────────────────────────────────────────────────── */
     if (window === window.top) {
         var fakeEl   = null;
-        var savedSt  = null;
         var savedAnc = null;
-        var PROPS    = ['position','top','left','right','bottom','width','height',
-                       'z-index','border','border-radius','transform','transition',
-                       'max-width','max-height','margin','clip','clip-path'];
+
+        /* Stylesheet-based fake-fs. Inline styles are vulnerable to site JS
+           overwriting (`iframe.style.position = 'absolute'` strips !important).
+           A stylesheet rule with !important wins over normal inline styles, so
+           we just toggle data-ss-fs on the iframe and let the cascade do its
+           job. Inserted at <html> level so it's always available, even before
+           <body> exists. */
+        var styleEl = document.createElement('style');
+        styleEl.id = 'ss-fake-fs-style';
+        styleEl.textContent =
+            'iframe[data-ss-fs="1"] {' +
+                'position: fixed !important;' +
+                'top: 0 !important;' +
+                'left: 0 !important;' +
+                'right: 0 !important;' +
+                'bottom: 0 !important;' +
+                'width: 100vw !important;' +
+                'height: 100vh !important;' +
+                'max-width: none !important;' +
+                'max-height: none !important;' +
+                'min-width: 0 !important;' +
+                'min-height: 0 !important;' +
+                'margin: 0 !important;' +
+                'padding: 0 !important;' +
+                'z-index: 2147483646 !important;' +
+                'border: none !important;' +
+                'border-radius: 0 !important;' +
+                'transform: none !important;' +
+                'transition: none !important;' +
+                'clip: auto !important;' +
+                'clip-path: none !important;' +
+                'display: block !important;' +
+                'visibility: visible !important;' +
+                'opacity: 1 !important;' +
+                'pointer-events: auto !important;' +
+            '}';
+        function injectStyle() {
+            if (document.getElementById('ss-fake-fs-style')) return;
+            (document.head || document.documentElement).appendChild(styleEl);
+        }
+        injectStyle();
+        /* If <head> wasn't ready, retry once DOM is parseable */
+        if (!document.getElementById('ss-fake-fs-style')) {
+            new MutationObserver(function (_, obs) {
+                if (document.head) { injectStyle(); obs.disconnect(); }
+            }).observe(document.documentElement, { childList: true, subtree: true });
+        }
 
         function findFrameByWindow(source) {
             var iframes = document.querySelectorAll('iframe');
@@ -64,43 +107,24 @@
         setInterval(bumpSsRoot, 500);
 
         /* Properties on ancestor elements that create a containing block for
-           position:fixed children (so 100vw/100vh would size to the ancestor,
-           not the viewport). We must neutralise all of these on every ancestor
-           when fake-fs'ing the iframe, otherwise fullscreen will be tiny. */
+           position:fixed children. Without resetting these, our 100vw/100vh
+           iframe would be sized relative to the transformed ancestor instead
+           of the viewport — so "fullscreen" came out tiny. */
         var ANC_PROPS = ['transform','filter','backdrop-filter','perspective',
-                         'will-change','contain','transform-style','overflow'];
+                         'will-change','contain'];
 
         function enterFake(fr) {
             if (fakeEl === fr) return;
             if (fakeEl) exitFake();
-            fakeEl  = fr;
-            savedSt = {};
-            PROPS.forEach(function (p) {
-                savedSt[p] = { v: fr.style.getPropertyValue(p), pri: fr.style.getPropertyPriority(p) };
-            });
-            fr.style.setProperty('position',      'fixed',      'important');
-            fr.style.setProperty('top',           '0',          'important');
-            fr.style.setProperty('left',          '0',          'important');
-            fr.style.setProperty('right',         '0',          'important');
-            fr.style.setProperty('bottom',        '0',          'important');
-            fr.style.setProperty('width',         '100vw',      'important');
-            fr.style.setProperty('height',        '100vh',      'important');
-            fr.style.setProperty('max-width',     'none',       'important');
-            fr.style.setProperty('max-height',    'none',       'important');
-            fr.style.setProperty('margin',        '0',          'important');
-            fr.style.setProperty('z-index',       '2147483646', 'important');
-            fr.style.setProperty('border',        'none',       'important');
-            fr.style.setProperty('border-radius', '0',          'important');
-            fr.style.setProperty('transform',     'none',       'important');
-            fr.style.setProperty('transition',    'none',       'important');
-            fr.style.setProperty('clip',          'auto',       'important');
-            fr.style.setProperty('clip-path',     'none',       'important');
+            fakeEl = fr;
+
+            /* Apply visual state via attribute → stylesheet rules with
+               !important. Site JS can't easily strip this since data-ss-fs
+               attribute survives style.cssText / style.position assignments. */
             fr.setAttribute('data-ss-fs', '1');
 
-            /* Walk up ancestors, neutralise containing-block-creating props.
-               Without this, a parent with `transform: translateZ(0)` or similar
-               makes our position:fixed iframe sized relative to that parent — so
-               "fullscreen" comes out as a tiny box. */
+            /* Neutralise ancestor transforms/filters so the iframe's
+               position:fixed is relative to the viewport, not some parent. */
             savedAnc = [];
             var node = fr.parentElement;
             while (node && node !== document.documentElement) {
@@ -108,14 +132,12 @@
                 ANC_PROPS.forEach(function (p) {
                     rec.props[p] = { v: node.style.getPropertyValue(p), pri: node.style.getPropertyPriority(p) };
                 });
-                node.style.setProperty('transform',        'none',    'important');
-                node.style.setProperty('filter',           'none',    'important');
-                node.style.setProperty('backdrop-filter',  'none',    'important');
-                node.style.setProperty('perspective',      'none',    'important');
-                node.style.setProperty('will-change',      'auto',    'important');
-                node.style.setProperty('contain',          'none',    'important');
-                node.style.setProperty('transform-style',  'flat',    'important');
-                node.style.setProperty('overflow',         'visible', 'important');
+                node.style.setProperty('transform',       'none', 'important');
+                node.style.setProperty('filter',          'none', 'important');
+                node.style.setProperty('backdrop-filter', 'none', 'important');
+                node.style.setProperty('perspective',     'none', 'important');
+                node.style.setProperty('will-change',     'auto', 'important');
+                node.style.setProperty('contain',         'none', 'important');
                 savedAnc.push(rec);
                 node = node.parentElement;
             }
@@ -127,14 +149,7 @@
         function exitFake() {
             if (!fakeEl) return;
             var fr = fakeEl; fakeEl = null;
-            PROPS.forEach(function (p) {
-                if (savedSt[p] && savedSt[p].v) {
-                    fr.style.setProperty(p, savedSt[p].v, savedSt[p].pri);
-                } else {
-                    fr.style.removeProperty(p);
-                }
-            });
-            /* Restore ancestor styles */
+            fr.removeAttribute('data-ss-fs');
             if (savedAnc) {
                 savedAnc.forEach(function (rec) {
                     ANC_PROPS.forEach(function (p) {
@@ -145,8 +160,6 @@
                 });
                 savedAnc = null;
             }
-            savedSt = null;
-            fr.removeAttribute('data-ss-fs');
             try { fr.contentWindow.postMessage({ type: 'SS_FS_OFF' }, '*'); } catch (_) {}
         }
 
