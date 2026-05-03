@@ -97,7 +97,22 @@ wss.on('connection', (ws) => {
             
             // Assign a unique avatar
             const usedAvatars = Array.from(room.clients).map(c => c.avatar);
-            ws.avatar = AVATAR_POOL.find(a => !usedAvatars.includes(a)) || AVATAR_POOL[Math.floor(Math.random() * AVATAR_POOL.length)];
+            // Deterministic Unique Avatar Assignment
+            const hash = (data.username || '').split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+            const poolIdx = Math.abs(hash) % AVATAR_POOL.length;
+            
+            // Start with preferred, then find next available
+            let selected = AVATAR_POOL[poolIdx];
+            const usedAvatars = Array.from(room.clients.values()).map(c => c.avatar);
+            if (usedAvatars.includes(selected)) {
+                for (const a of AVATAR_POOL) {
+                    if (!usedAvatars.includes(a)) {
+                        selected = a;
+                        break;
+                    }
+                }
+            }
+            ws.avatar = selected;
             
             room.clients.add(ws);
             broadcastRoomUpdate(roomId);
@@ -131,7 +146,14 @@ wss.on('connection', (ws) => {
 
             else if (data.type === 'CHAT_MESSAGE') {
                 const text = (data.text || '').substring(0, 500); // max message length
-                broadcastToRoom(ws.roomId, { type: 'CHAT_MESSAGE', username: ws.username, color: ws.color, avatar: ws.avatar, text }, null);
+                broadcastToRoom(ws.roomId, { 
+                    type: 'CHAT_MESSAGE', 
+                    username: ws.username, 
+                    color: ws.color, 
+                    avatar: ws.avatar, 
+                    userId: ws.id, // CRITICAL for consistent avatar lookups
+                    text 
+                }, null);
             }
 
             else if (data.type === 'REACTION') {

@@ -161,7 +161,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
-    else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color, msg.avatar);
+    else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color, msg.avatar, msg.userId);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
     else if (msg.type === 'TOAST') {
         // Server emits TOAST for membership/host events. Route those into the
@@ -222,27 +222,18 @@ function findMainVideo() {
 function broadcastState(event = 'sync') {
     if (!videoElement || isSyncing || !roomState) return;
 
-    // Logic Fix: Only the host can broadcast if Host Control Only is enabled
     if (roomState.hostControlOnly && !roomState.isHost) return;
 
-    // Logic Fix: Participants should not broadcast if they are on a different video than the host
     if (!roomState.isHost && roomState.nowPlayingUrl) {
         try {
             const hostUrl = new URL(roomState.nowPlayingUrl);
             const myUrl   = new URL(window.location.href);
-            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) {
-                return; // Not on the same video, don't broadcast
-            }
+            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) return;
         } catch(e) {}
     }
     
     const time = videoElement.currentTime;
     const rate = videoElement.playbackRate;
-
-    // Logic Fix: Immediate feedback for manual actions
-    if (event !== 'sync') {
-        console.log(`[SyncStream] Broadcasting ${event} at ${time}`);
-    }
 
     chrome.runtime.sendMessage({
         type: 'PLAYER_EVENT', event,
@@ -250,119 +241,87 @@ function broadcastState(event = 'sync') {
         playbackRate: rate
     }).catch(() => {});
 
-    // Show locally too so the user sees their own actions in chat (like Teleparty)
     let line = '';
     const t = fmtTime(time);
-    if      (event === 'play')   line = wasPaused ? 'started playing the video' : 'resumed at ' + t;
+    if      (event === 'play')   line = wasPaused ? 'started playing' : 'resumed at ' + t;
     else if (event === 'pause') {
-        // Logic Fix: Don't show pause message if it's just a side-effect of seeking
         if (Date.now() - lastSeekTime < 500) return;
-        line = 'paused the video at ' + t;
+        line = 'paused at ' + t;
     }
     else if (event === 'seek') {
         lastSeekTime = Date.now();
         line = 'jumped to ' + t;
     }
-    else if (event === 'rate')   line = `changed speed to ${rate}x`;
 
-    // Suppress "00:00 paused" at video start
-    if (event === 'pause' && (time < 0.1 || time === 0) && isInitialLoad) { line = ''; }
-    
-    if (line) addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
-    if (event === 'play' || event === 'pause') {
-        wasPaused = (event === 'pause');
+    if (line && !isInitialLoad) {
+        addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
     }
+    
+    if (event === 'play' || event === 'pause') wasPaused = (event === 'pause');
     isInitialLoad = false;
 
     isSyncing = true;
-    setTimeout(() => { isSyncing = false; }, 1000); // Increased lock to prevent echo
+    setTimeout(() => { isSyncing = false; }, 400); 
 }
 
-// ─── HEARTBEAT ────────────────────────────────────────────────────────────────
+// ─── HEARTBEAT (INDUSTRY STANDARD: 3s) ────────────────────────────────────────
 setInterval(() => {
     if (roomState?.isHost && videoElement && !videoElement.paused) {
         broadcastState('sync');
     }
-}, 5000); // 5s heartbeat to correct drift
+}, 3000); 
 
 function applyRemoteSync(msg) {
     if (!videoElement) videoElement = findMainVideo();
-    if (!videoElement || !roomState) return;
+    if (!videoElement || !roomState || roomState.isHost) return;
 
-    // Logic Fix: Host should NEVER apply remote sync to themselves to avoid loops
-    if (roomState.isHost) return;
-
-    // CRITICAL: Only sync if we are on the same video/URL as the host
     if (roomState?.nowPlayingUrl) {
         try {
             const hostUrl = new URL(roomState.nowPlayingUrl);
             const myUrl   = new URL(window.location.href);
-            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) {
-                console.log('[SyncStream] Ignoring sync: URL mismatch', { host: hostUrl.pathname, mine: myUrl.pathname });
-                return; 
-            }
+            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) return;
         } catch(e) {}
     }
 
-    isSyncing = true;
-    const diff = Math.abs(videoElement.currentTime - msg.time);
-    const wasPaused = videoElement.paused;
+    const drift = Math.abs(videoElement.currentTime - msg.time);
+    const hostPaused = (msg.event === 'pause' || (msg.event === 'sync' && msg.isPaused));
 
-    // Logic Fix: Wait for video to be ready before applying sync if it's uninitialized
     const doApply = () => {
-        // Threshold (0.8s) for drift, but instant for play/pause/seek
-        if (diff > 0.8 || wasPaused !== (msg.event === 'pause') || msg.event === 'seek' || msg.event === 'sync') {
-            if (msg.event === 'play') {
-                videoElement.currentTime = msg.time;
-                videoElement.play().catch(() => {
-                    // Try to play again after a short delay if it fails
-                    setTimeout(() => videoElement.play().catch(() => {}), 500);
-                });
-            } else if (msg.event === 'pause') {
-                videoElement.pause();
-                videoElement.currentTime = msg.time;
-            } else if (msg.event === 'seek' || msg.event === 'sync') {
-                videoElement.currentTime = msg.time;
-            }
+        isSyncing = true;
+        
+        if (msg.event === 'play' || (msg.event === 'sync' && !hostPaused && videoElement.paused)) {
+            videoElement.currentTime = msg.time;
+            videoElement.play().catch(() => {
+                setTimeout(() => videoElement.play().catch(() => {}), 500);
+            });
+        } 
+        else if (msg.event === 'pause' || (msg.event === 'sync' && hostPaused && !videoElement.paused)) {
+            videoElement.pause();
+            videoElement.currentTime = msg.time;
         }
+        else if (msg.event === 'seek' || drift > 1.5) {
+            videoElement.currentTime = msg.time;
+        }
+
         if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
+        setTimeout(() => { isSyncing = false; }, 600);
     };
 
-    if (videoElement.readyState >= 2) {
-        doApply();
-    } else {
+    if (videoElement.readyState >= 2) doApply();
+    else {
         videoElement.addEventListener('loadedmetadata', doApply, { once: true });
         videoElement.addEventListener('canplay', doApply, { once: true });
-        // Fallback for extremely slow loads
-        setTimeout(doApply, 3000);
     }
 
-    // 0.8s lock for remote syncs to ensure all triggered events are ignored
-    // Reduced from 1.0s to allow faster response to user actions
-    setTimeout(() => { isSyncing = false; }, 800); 
-
-    // Debug Log
-    console.log(`[SyncStream] Applied remote ${msg.event} by ${msg.byUsername} at ${msg.time}`);
-
-    // Add a system event line in chat (Netflix Party style)
-    const actor = msg.byUsername || '';
-    const userColor = (roomState?.users || []).find(u => u.username === actor)?.color;
-    const t = fmtTime(msg.time);
-    let line = '';
-    if      (msg.event === 'play')   line = wasPaused ? 'started playing the video' : 'resumed at ' + t;
-    else if (msg.event === 'pause')  line = 'paused the video at ' + t;
-    else if (msg.event === 'seek')   line = 'jumped to ' + t;
-    else if (msg.event === 'rate')   line = `changed speed to ${msg.playbackRate}x`;
-
-    // Suppress redundant sync messages on initial load
-    if (isInitialLoad && (msg.event === 'play' || msg.event === 'pause')) { line = ''; }
-    
-    if (line) addSystemMessage(line, userColor, { actor });
-    
-    if (msg.event === 'play' || msg.event === 'pause') {
-        wasPaused = (msg.event === 'pause');
+    if (msg.event !== 'sync' && !isInitialLoad) {
+        const actor = msg.byUsername || 'Host';
+        let line = '';
+        const t = fmtTime(msg.time);
+        if      (msg.event === 'play')   line = 'started playing';
+        else if (msg.event === 'pause')  line = 'paused at ' + t;
+        else if (msg.event === 'seek')   line = 'jumped to ' + t;
+        if (line) addSystemMessage(line, msg.color || '#6366f1', { actor });
     }
-    isInitialLoad = false;
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
@@ -970,12 +929,12 @@ function playNotifSound() {
 }
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
-function handleIncomingChat(user, text, color, avatar) {
+function handleIncomingChat(user, text, color, avatar, userId) {
     if (text && text.startsWith('gif:')) {
         const url = text.replace('gif:', '');
         addSystemMessage(`<img src="${url}" style="width:100%;border-radius:12px;margin-top:6px;box-shadow:0 8px 30px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);display:block;">`, color, { actor: user, isHtml: true });
     } else {
-        addChatMessage(user, text, color, avatar);
+        addChatMessage(user, text, color, avatar, userId);
     }
 
     if (!isChatOpen) {
@@ -1003,6 +962,7 @@ function addChatMessage(user, text, color, avatar, userId) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
 
+    // Logic Fix: Always use the centralized map for avatars to ensure consistency
     const displayAvatar = avatar || getAvatar(userId, user);
 
     const m = document.createElement('div');
