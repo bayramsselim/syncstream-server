@@ -938,16 +938,10 @@ function updateButtons() {
 }
 
 function updateParticipantPanel() {
-    // Update the side panel header subtitle with room ID + user count.
-    // The old #ss-participants standalone panel is removed; participants are
-    // shown via the camera gallery (which contains avatar tiles for everyone).
     if (!roomState) return;
-    const sub = document.getElementById('ss-panel-sub');
-    if (sub) {
-        const userCount = (roomState.users || []).length;
-        const roomId = roomState.roomId || '';
-        const label = userCount === 1 ? 'user' : 'users';
-        sub.textContent = roomId ? `${roomId} · ${userCount} ${label}` : `${userCount} ${label}`;
+    const countEl = document.getElementById('ss-panel-user-count');
+    if (countEl) {
+        countEl.textContent = String((roomState.users || []).length);
     }
 }
 
@@ -1078,35 +1072,55 @@ function injectUI() {
     // ── SIDE PANEL ────────────────────────────────────────────────────────────
     const panel = document.createElement('div');
     panel.id = 'ss-panel';
-    panel.style.cssText = 'position:absolute;top:0;right:0;width:320px;height:100%;max-width:80vw;background:rgba(6,6,14,0.97);backdrop-filter:blur(24px);border-left:1px solid rgba(255,255,255,0.08);box-shadow:-8px 0 32px rgba(0,0,0,0.5);transform:translateX(100%);pointer-events:auto;display:flex;flex-direction:column;color:#fff;';
+    panel.style.cssText = 'position:absolute;top:0;right:0;width:320px;height:100%;max-width:80vw;background:rgba(6,6,14,0.98);backdrop-filter:blur(24px);border-left:1px solid rgba(255,255,255,0.1);box-shadow:-8px 0 32px rgba(0,0,0,0.5);transform:translateX(100%);pointer-events:auto;display:flex;flex-direction:column;color:#fff;z-index:2;';
     root.appendChild(panel);
 
     // Header
     const pHeader = document.createElement('div');
     pHeader.style.cssText = 'padding:14px 16px;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
+    
+    // Left side: App Logo/Name
     const pHeaderLeft = document.createElement('div');
-    pHeaderLeft.style.cssText = 'display:flex;flex-direction:column;gap:2px;min-width:0;';
+    pHeaderLeft.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    const logoIcon = document.createElement('div');
+    logoIcon.style.cssText = 'width:24px;height:24px;background:linear-gradient(135deg, #6366f1, #a855f7);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:900;color:#fff;';
+    logoIcon.textContent = 'S';
     const pHeaderTitle = document.createElement('div');
-    pHeaderTitle.style.cssText = 'font-size:13px;font-weight:700;letter-spacing:0.04em;color:#fff;';
+    pHeaderTitle.style.cssText = 'font-size:14px;font-weight:700;letter-spacing:0.02em;color:#fff;';
     pHeaderTitle.textContent = 'SyncStream';
-    const pHeaderSub = document.createElement('div');
-    pHeaderSub.id = 'ss-panel-sub';
-    pHeaderSub.style.cssText = 'font-size:10px;color:#888;letter-spacing:0.04em;';
-    pHeaderSub.textContent = '';
+    pHeaderLeft.appendChild(logoIcon);
     pHeaderLeft.appendChild(pHeaderTitle);
-    pHeaderLeft.appendChild(pHeaderSub);
     pHeader.appendChild(pHeaderLeft);
 
+    // Right side: Controls (Users, Share, Exit)
     const pHeaderRight = document.createElement('div');
-    pHeaderRight.style.cssText = 'display:flex;gap:6px;flex-shrink:0;';
+    pHeaderRight.style.cssText = 'display:flex;align-items:center;gap:12px;';
+    
+    // User Count
+    const userCountBox = document.createElement('div');
+    userCountBox.style.cssText = 'display:flex;align-items:center;gap:4px;color:#aaa;font-size:12px;font-weight:600;background:rgba(255,255,255,0.05);padding:4px 8px;border-radius:6px;';
+    userCountBox.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg> <span id="ss-panel-user-count">1</span>`;
+    pHeaderRight.appendChild(userCountBox);
+
+    // Share Button
+    const shareBtn = document.createElement('button');
+    shareBtn.style.cssText = 'background:none;border:none;color:#aaa;cursor:pointer;padding:4px;display:flex;align-items:center;transition:color 0.2s;';
+    shareBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path><polyline points="16 6 12 2 8 6"></polyline><line x1="12" y1="2" x2="12" y2="15"></line></svg>`;
+    shareBtn.title = 'Share Party Link';
+    shareBtn.onmouseenter = () => shareBtn.style.color = '#fff';
+    shareBtn.onmouseleave = () => shareBtn.style.color = '#aaa';
+    pHeaderRight.appendChild(shareBtn);
+
+    // Leave Button
     const leaveBtn = document.createElement('button');
-    leaveBtn.innerHTML = '🚪';
+    leaveBtn.style.cssText = 'background:none;border:none;color:#aaa;cursor:pointer;padding:4px;display:flex;align-items:center;transition:color 0.2s;';
+    leaveBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>`;
     leaveBtn.title = 'Leave Room';
-    leaveBtn.style.cssText = 'background:rgba(239,68,68,0.15);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;';
-    leaveBtn.onmouseenter = () => { leaveBtn.style.background = 'rgba(239,68,68,0.4)'; };
-    leaveBtn.onmouseleave = () => { leaveBtn.style.background = 'rgba(239,68,68,0.15)'; };
-    leaveBtn.onclick = () => { chrome.runtime.sendMessage({ type: 'LEAVE_ROOM' }); };
+    leaveBtn.onmouseenter = () => leaveBtn.style.color = '#ef4444';
+    leaveBtn.onmouseleave = () => leaveBtn.style.color = '#aaa';
+    leaveBtn.onclick = () => { if(confirm('Leave the party?')) chrome.runtime.sendMessage({ type: 'LEAVE_ROOM' }); };
     pHeaderRight.appendChild(leaveBtn);
+
     pHeader.appendChild(pHeaderRight);
     panel.appendChild(pHeader);
 
@@ -1118,11 +1132,89 @@ function injectUI() {
     npLabel.textContent = 'Now Playing';
     const npTitle = document.createElement('div');
     npTitle.id = 'ss-np-title';
-    npTitle.style.cssText = 'font-size:12px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-    npTitle.textContent = '—';
+    npTitle.style.cssText = 'font-size:12px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;';
+    npTitle.textContent = 'Scanning...';
     npRow.appendChild(npLabel);
     npRow.appendChild(npTitle);
     panel.appendChild(npRow);
+
+    // ── SHARE MODAL ───────────────────────────────────────────────────────────
+    const shareModal = document.createElement('div');
+    shareModal.id = 'ss-share-modal';
+    shareModal.style.cssText = 'position:absolute;top:54px;left:50%;transform:translateX(-50%);width:280px;background:#1a1c2e;border:1px solid rgba(255,255,255,0.1);border-radius:16px;padding:20px;box-shadow:0 12px 48px rgba(0,0,0,0.8);display:none;flex-direction:column;gap:16px;z-index:100;animation:ss-slideDown 0.3s ease;';
+    
+    const modalTitle = document.createElement('div');
+    modalTitle.style.cssText = 'font-size:14px;font-weight:700;text-align:center;margin-bottom:4px;';
+    modalTitle.textContent = 'Share this Party';
+    shareModal.appendChild(modalTitle);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.style.cssText = 'width:100%;padding:12px;background:none;border:1px solid #6366f1;border-radius:10px;color:#818cf8;font-weight:700;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;transition:all 0.2s;';
+    copyBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg> COPY LINK`;
+    copyBtn.onclick = () => {
+        const url = new URL(window.location.href);
+        url.hash = `ss_room=${roomState.roomId}`;
+        navigator.clipboard.writeText(url.toString()).then(() => {
+            copyBtn.textContent = '✓ COPIED';
+            copyBtn.style.borderColor = '#10b981';
+            copyBtn.style.color = '#10b981';
+            setTimeout(() => {
+                copyBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path></svg> COPY LINK`;
+                copyBtn.style.borderColor = '#6366f1';
+                copyBtn.style.color = '#818cf8';
+            }, 2000);
+        });
+    };
+    shareModal.appendChild(copyBtn);
+
+    const socialRow = document.createElement('div');
+    socialRow.style.cssText = 'display:flex;justify-content:center;gap:20px;padding-top:4px;';
+    
+    const createSocial = (icon, color, link) => {
+        const a = document.createElement('a');
+        a.href = link; a.target = '_blank';
+        a.style.cssText = `color:${color};opacity:0.8;transition:transform 0.2s, opacity 0.2s;cursor:pointer;`;
+        a.innerHTML = icon;
+        a.onmouseenter = () => { a.style.opacity = '1'; a.style.transform = 'scale(1.2)'; };
+        a.onmouseleave = () => { a.style.opacity = '0.8'; a.style.transform = 'scale(1)'; };
+        return a;
+    };
+
+    const getLink = () => {
+        const url = new URL(window.location.href);
+        url.hash = `ss_room=${roomState.roomId}`;
+        return encodeURIComponent(url.toString());
+    };
+
+    const whatsapp = createSocial(`<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.414 0 .018 5.396.015 12.03c0 2.12.554 4.189 1.604 6.04L0 24l6.104-1.602a11.803 11.803 0 005.942 1.6h.005c6.634 0 12.032-5.396 12.035-12.032a11.761 11.761 0 00-3.473-8.497"/></svg>`, '#25D366', '');
+    whatsapp.onclick = (e) => { e.preventDefault(); window.open(`https://api.whatsapp.com/send?text=Join my party! ${getLink()}`, '_blank'); };
+    
+    const telegram = createSocial(`<svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.562 8.161c-.18.717-3.931 16.326-4.131 17.151-.2.825-.46 1.013-.744 1.038-.614.053-1.079-.41-1.674-.8l-2.619-1.921-1.411-1.144c-.046-.037-.09-.074-.132-.112l-.082-.072c-.1-.088-.19-.177-.28-.27l4.316-4.088c.038-.036.074-.074.11-.112l.142-.152c.036-.041.066-.085.093-.131.063-.105.097-.225.098-.348-.001-.132-.036-.26-.102-.375-.125-.218-.383-.342-.644-.31l-5.69 2.158c-.105.04-.213.076-.324.108l-.29.082c-.443.125-.873.188-1.288.188-.415 0-.811-.063-1.186-.188l-.29-.096c-.161-.054-.319-.115-.472-.182l-.181-.078c-.37-.16-.723-.338-1.054-.531.428-.152.923-.314 1.48-.485 3.336-1.026 12.019-4.524 14.186-5.405.813-.331 1.62-.48 2.401-.444.78.036 1.503.22 2.156.551.493.25.922.585 1.28.995.358.411.644.895.852 1.442.208.547.332 1.155.37 1.81.038.655-.001 1.353-.118 2.083z"/></svg>`, '#0088cc', '');
+    telegram.onclick = (e) => { e.preventDefault(); window.open(`https://t.me/share/url?url=${getLink()}&text=Join my party!`, '_blank'); };
+    
+    const mail = createSocial(`<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>`, '#fff', '');
+    mail.onclick = (e) => { e.preventDefault(); window.open(`mailto:?subject=Join my SyncStream Party&body=Join here: ${getLink()}`, '_blank'); };
+
+    socialRow.appendChild(whatsapp);
+    socialRow.appendChild(telegram);
+    socialRow.appendChild(mail);
+    shareModal.appendChild(socialRow);
+    
+    panel.appendChild(shareModal);
+
+    shareBtn.onclick = (e) => {
+        e.stopPropagation();
+        const isOpen = shareModal.style.display === 'flex';
+        shareModal.style.display = isOpen ? 'none' : 'flex';
+    };
+    document.addEventListener('click', (e) => { if(!shareModal.contains(e.target)) shareModal.style.display = 'none'; });
+
+    // CSS for modal animation
+    const styleModal = document.createElement('style');
+    styleModal.textContent = `
+        @keyframes ss-slideDown { from { opacity:0; transform:translate(-50%, -10px); } to { opacity:1; transform:translate(-50%, 0); } }
+    `;
+    document.head.appendChild(styleModal);
 
     // Chat scroll area
     const msgs = document.createElement('div');
@@ -1144,7 +1236,7 @@ function injectUI() {
         });
     }
 
-    // ── REACTIONS ROW (always visible, screen-wide animated) ────────────────
+    // ── REACTIONS ROW ────────────────────────────────────────────────────────
     const reactionsRow = document.createElement('div');
     reactionsRow.id = 'ss-reactions-row';
     reactionsRow.style.cssText = 'padding:8px 14px 6px;display:flex;justify-content:space-around;align-items:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;';
@@ -1152,7 +1244,6 @@ function injectUI() {
     REACTIONS.forEach(em => {
         const rb = document.createElement('button');
         rb.textContent = em;
-        rb.title = 'Send reaction';
         rb.style.cssText = 'background:none;border:none;font-size:22px;cursor:pointer;padding:4px 6px;border-radius:50%;transition:transform 0.15s,background 0.15s;line-height:1;';
         rb.onmouseenter = () => { rb.style.transform = 'scale(1.25)'; rb.style.background = 'rgba(255,255,255,0.08)'; };
         rb.onmouseleave = () => { rb.style.transform = 'scale(1)'; rb.style.background = 'none'; };
@@ -1178,7 +1269,6 @@ function injectUI() {
 
     const sendBtn = document.createElement('button');
     sendBtn.textContent = '↑';
-    sendBtn.title = 'Send';
     sendBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.15s,transform 0.15s;';
     sendBtn.onmouseenter = () => { sendBtn.style.background='#4f46e5'; sendBtn.style.transform='scale(1.08)'; };
     sendBtn.onmouseleave = () => { sendBtn.style.background='#6366f1'; sendBtn.style.transform='scale(1)'; };
@@ -1195,25 +1285,11 @@ function injectUI() {
     chatInput.addEventListener('keydown',  e => e.stopPropagation());
     chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
 
-    // ── CHAT EMOJI PICKER (separate from reactions — these get inserted
-    //    into the text input, not broadcast as a flying reaction) ──────────
+    // ── EMOJI PICKER ─────────────────────────────────────────────────────────
     const emojiPicker = document.createElement('div');
     emojiPicker.id = 'ss-emoji-picker';
     emojiPicker.style.cssText = 'position:absolute;bottom:48px;right:8px;width:240px;max-height:200px;overflow-y:auto;background:rgba(20,20,30,0.98);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:12px;padding:8px;display:none;grid-template-columns:repeat(7,1fr);gap:2px;z-index:5;box-shadow:0 4px 20px rgba(0,0,0,0.6);animation:ss-pop 0.18s ease;';
-    const CHAT_EMOJIS = [
-        '😀','😃','😄','😁','😆','😅','🤣',
-        '😂','🙂','😉','😊','😇','🥰','😍',
-        '🤩','😘','😗','😋','😛','😜','🤪',
-        '😎','🤓','🧐','🤔','🤨','😐','😑',
-        '😶','🙄','😏','😒','😔','😪','😴',
-        '🤤','😵','🤯','🥳','😎','🤠','🥸',
-        '😢','😭','😱','😨','😰','😥','😓',
-        '🤗','🤭','🤫','😬','🙃','😡','🤬',
-        '👍','👎','👏','🙏','💪','✊','🤝',
-        '❤️','💔','💖','💯','🔥','✨','⭐',
-        '🎉','🎊','🎁','🎂','☕','🍕','🍔',
-        '🎬','🎵','🎮','⚽','🏆','💡','✅'
-    ];
+    const CHAT_EMOJIS = ['😀','😃','😄','😁','😆','😅','🤣','😂','🙂','😉','😊','😇','🥰','😍','🤩','😘','😗','😋','😛','😜','🤪','😎','🤓','🧐','🤔','🤨','😐','😑','😶','🙄','😏','😒','😔','😪','😴','🤤','😵','🤯','🥳','🤠','🥸','😢','😭','😱','😨','😰','😥','😓','🤗','🤭','🤫','😬','🙃','😡','🤬','👍','👎','👏','🙏','💪','✊','🤝','❤️','💔','💖','💯','🔥','✨','⭐','🎉','🎊','🎁','🎂','☕','🍕','🍔','🎬','🎵','🎮','⚽','🏆','💡','✅'];
     CHAT_EMOJIS.forEach(em => {
         const eb = document.createElement('button');
         eb.textContent = em;
@@ -1222,7 +1298,6 @@ function injectUI() {
         eb.onmouseleave = () => { eb.style.background = 'none'; eb.style.transform = 'scale(1)'; };
         eb.onclick = (ev) => {
             ev.stopPropagation();
-            // Insert at cursor position, keep input focused
             const start = chatInput.selectionStart || chatInput.value.length;
             const end   = chatInput.selectionEnd   || chatInput.value.length;
             chatInput.value = chatInput.value.slice(0, start) + em + chatInput.value.slice(end);
@@ -1233,12 +1308,9 @@ function injectUI() {
     });
     inputRow.appendChild(emojiPicker);
 
-    // ── BOTTOM CONTROLS ROW ──────────────────────────────────────────────────
-    //   Left:  📷 🎤 🖥  (media toggles)
-    //   Right: 😊 GIF 🎉 (chat emoji picker, GIF, quick-react)
+    // ── BOTTOM CONTROLS ──────────────────────────────────────────────────────
     const bottomRow = document.createElement('div');
     bottomRow.style.cssText = 'padding:6px 12px 10px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
-
     const leftCtrls = document.createElement('div');
     leftCtrls.style.cssText = 'display:flex;gap:4px;align-items:center;';
     const rightCtrls = document.createElement('div');
@@ -1250,8 +1322,8 @@ function injectUI() {
         b.innerHTML = content; b.title = tip || '';
         const o = opts || {};
         b.style.cssText = `background:${o.bg || 'rgba(255,255,255,0.06)'};border:none;color:#fff;width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:background 0.15s,transform 0.12s;flex-shrink:0;`;
-        b.onmouseenter = () => { if (!o.disabled) b.style.background = 'rgba(255,255,255,0.16)'; b.style.transform='scale(1.08)'; };
-        b.onmouseleave = () => { b.style.transform='scale(1)'; if (id) updateButtons(); else b.style.background = o.bg || 'rgba(255,255,255,0.06)'; };
+        b.onmouseenter = () => { b.style.background = 'rgba(255,255,255,0.16)'; b.style.transform='scale(1.08)'; };
+        b.onmouseleave = () => { b.style.transform='scale(1)'; updateButtons(); };
         b.onclick = (e) => { e.stopPropagation(); handler(); };
         return b;
     };
@@ -1260,36 +1332,19 @@ function injectUI() {
     leftCtrls.appendChild(mkSmallBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },  'Mic (Alt+M)'));
     leftCtrls.appendChild(mkSmallBtn('🖥', 'ss-b-screen', () => toggleScreenShare(),                     'Screen (Alt+S)'));
 
-    // Chat emoji picker toggle
     const emojiBtn = mkSmallBtn('😊', null, () => {
-        const open = emojiPicker.style.display !== 'grid';
-        emojiPicker.style.display = open ? 'grid' : 'none';
-        if (open) chatInput.focus();
-    }, 'Insert emoji');
-
-    // GIF placeholder (visible for design parity; actual Tenor integration is a future task)
-    const gifBtn = mkSmallBtn('<span style="font-size:9px;font-weight:700;letter-spacing:0.04em;">GIF</span>', null,
-        () => { showToast('GIF picker coming soon', '#6366f1'); }, 'GIFs (coming soon)');
-    gifBtn.style.opacity = '0.55';
-
-    // Quick-reaction shortcut: sends 🎉
-    const partyBtn = mkSmallBtn('🎉', null,
-        () => { chrome.runtime.sendMessage({ type: 'REACTION', emoji: '🎉' }); }, 'Send 🎉 reaction');
+        emojiPicker.style.display = emojiPicker.style.display === 'grid' ? 'none' : 'grid';
+    }, 'Emojis');
+    
+    const partyBtn = mkSmallBtn('🎉', null, () => {
+        chrome.runtime.sendMessage({ type: 'REACTION', emoji: '🎉' });
+    }, 'Quick Party!');
 
     rightCtrls.appendChild(emojiBtn);
-    rightCtrls.appendChild(gifBtn);
     rightCtrls.appendChild(partyBtn);
-
     bottomRow.appendChild(leftCtrls);
     bottomRow.appendChild(rightCtrls);
     panel.appendChild(bottomRow);
-
-    // Click outside emoji picker to close it
-    document.addEventListener('click', (e) => {
-        if (emojiPicker.style.display === 'grid' && !emojiPicker.contains(e.target) && e.target !== emojiBtn) {
-            emojiPicker.style.display = 'none';
-        }
-    });
 
     // ── PANEL TOGGLE ─────────────────────────────────────────────────────────
     const toggle = document.createElement('div');
@@ -1300,14 +1355,12 @@ function injectUI() {
     toggleIcon.textContent = '💬';
     toggle.appendChild(toggleIcon);
 
-    // Unread badge on toggle (replaces old ss-chat-badge in dock)
     const badge = document.createElement('div');
     badge.id = 'ss-chat-badge';
     badge.style.cssText = 'position:absolute;top:5px;right:4px;background:#ef4444;color:#fff;font-size:9px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:none;align-items:center;justify-content:center;pointer-events:none;padding:0 4px;border:1px solid rgba(6,6,14,0.95);box-sizing:content-box;';
     toggle.appendChild(badge);
     root.appendChild(toggle);
 
-    // Open/close panel
     const setPanelOpen = (open) => {
         isChatOpen = open;
         if (open) {
@@ -1324,29 +1377,9 @@ function injectUI() {
         }
     };
     toggle.onclick = (e) => { e.stopPropagation(); setPanelOpen(!isChatOpen); };
-
-    // Expose so the keyboard shortcut handler can use the same toggle
     window.__ssTogglePanel = () => setPanelOpen(!isChatOpen);
 
-    // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
-    function syncRootToFullscreen() {
-        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-        if (!fsEl) {
-            if (root.parentElement !== document.body) document.body.appendChild(root);
-            return;
-        }
-        if (fsEl.contains(root)) return;
-        if (fsEl.tagName === 'IFRAME') return;
-        let target = fsEl;
-        while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
-        if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
-        target.style.overflow = 'visible';
-        target.appendChild(root);
-    }
-    document.addEventListener('fullscreenchange',       () => setTimeout(syncRootToFullscreen, 0));
-    document.addEventListener('webkitfullscreenchange', () => setTimeout(syncRootToFullscreen, 0));
-
-    // ── AWAY DETECTION ────────────────────────────────────────────────────────
+    // ── UTILS / EVENTS ───────────────────────────────────────────────────────
     const AWAY_MS = 3 * 60 * 1000;
     const resetAway = () => {
         clearTimeout(awayTimer);
@@ -1362,17 +1395,12 @@ function injectUI() {
     ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
     resetAway();
 
-    // ── HEARTBEAT (Keeps background worker and tab alive) ────────────────────
     setInterval(() => {
-        if (roomState?.roomId) {
-            chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
-        }
+        if (roomState?.roomId) chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
     }, 30000);
 
-    // ── VISIBILITY DETECTION (Re-sync when tab is back in focus) ─────────────
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState === 'visible' && roomState?.roomId) {
-            // Re-request latest room state and now playing info
             chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
                 if (res?.roomId) {
                     roomState = res;
