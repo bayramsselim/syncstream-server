@@ -872,17 +872,9 @@ function addSystemMessage(text, color, opts) {
         sessionStorage.setItem('ss-chat', JSON.stringify(history));
     } catch (_) {}
 
-    // Bump unread + flash toggle when panel is closed (same as chat messages)
-    if (!isChatOpen) {
-        unreadCount++;
-        updateUnreadBadge();
-        const tog = document.getElementById('ss-panel-toggle');
-        if (tog) {
-            const orig = tog.style.background;
-            tog.style.background = 'rgba(99,102,241,0.4)';
-            setTimeout(() => { tog.style.background = orig || ''; }, 600);
-        }
-    }
+    // Intentionally NO unread badge / no toggle flash / no sound — system events
+    // are passive timeline entries, not actionable like chat messages. Only
+    // human-typed CHAT_MESSAGE bumps unread (handled in handleIncomingChat).
 }
 
 // Format seconds to MM:SS (e.g. 67 → "01:07")
