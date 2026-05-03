@@ -110,8 +110,32 @@ chrome.runtime.onMessage.addListener((msg) => {
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
     else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
-    else if (msg.type === 'TOAST')         showToast(msg.message, msg.color);
-    else if (msg.type === 'NOW_PLAYING')   { const el = document.getElementById('ss-np-title'); if (el) el.textContent = msg.title; }
+    else if (msg.type === 'TOAST') {
+        // Server emits TOAST for membership/host events. Route those into the
+        // chat history (system message) instead of as a transient on-screen
+        // toast, so the chat scroll becomes the persistent timeline.
+        const text = String(msg.message || '');
+        const m = text.match(/^(.+?)\s+(joined|left|disconnected)\b/i);
+        if (m) {
+            const verb = m[2].toLowerCase();
+            const phrase = verb === 'joined' ? 'joined the party 🎉'
+                         : verb === 'left'   ? 'left the party'
+                         :                     'disconnected';
+            addSystemMessage(phrase, msg.color, { actor: m[1] });
+        } else {
+            // Generic toast still goes on-screen (errors, transient notices)
+            showToast(text, msg.color);
+        }
+    }
+    else if (msg.type === 'NOW_PLAYING') {
+        const el = document.getElementById('ss-np-title');
+        if (el) el.textContent = msg.title || '—';
+        // Add to chat history when title actually changes (skip first set)
+        if (msg.title && lastTitle && lastTitle !== msg.title) {
+            addSystemMessage(`now playing: ${msg.title}`, '#6366f1', { actor: '' });
+        }
+        if (msg.title) lastTitle = msg.title;
+    }
     else if (msg.type === 'RECONNECTING')  { if (roomState) showReconnectToast(msg.seconds); }
     else if (msg.type === 'CONNECTION_STATUS' && msg.connected) { const rt = document.getElementById('ss-reconnect-toast'); if (rt) rt.remove(); }
     else if (msg.type === 'HOST_NAVIGATE') showNavigateToast(msg.url, msg.title, msg.username);
@@ -139,9 +163,8 @@ function applyRemoteSync(msg) {
     if (!videoElement) return;
     isSyncing = true;
 
-    showSyncIndicator(msg.byUsername, msg.event);
-
     const diff = Math.abs(videoElement.currentTime - msg.time);
+    const wasPaused = videoElement.paused;
 
     if (msg.event === 'pause') {
         videoElement.currentTime = msg.time; // exact timestamp — no drift on pause
@@ -155,18 +178,20 @@ function applyRemoteSync(msg) {
 
     if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
     setTimeout(() => { isSyncing = false; }, 150); // 500→150ms: unlock faster
-}
 
-function showSyncIndicator(byUser, event) {
-    const ind = document.getElementById('ss-sync-ind');
-    if (!ind) return;
-    const icons = { play: '▶', pause: '⏸', seek: '⏩', rate: '⚡', sync: '⟳' };
-    const icon  = icons[event] || '⟳';
-    ind.textContent = byUser ? `${icon}  ${byUser}` : `${icon}  syncing...`;
-    ind.style.opacity = '1';
-    ind.style.transform = 'translateX(-50%) scale(1.06)';
-    clearTimeout(ind._t);
-    ind._t = setTimeout(() => { ind.style.opacity = '0'; ind.style.transform = 'translateX(-50%) scale(1)'; }, 2200);
+    // Add a system event line in chat (Netflix Party style):
+    //   "Selim paused the video at 1:37"
+    //   "Ali jumped to 12:34"
+    //   "Beni started playing the video"
+    const actor = msg.byUsername || '';
+    const userColor = (roomState?.users || []).find(u => u.username === actor)?.color;
+    const t = fmtTime(msg.time);
+    let line = '';
+    if      (msg.event === 'play')   line = wasPaused ? 'started playing the video' : 'resumed at ' + t;
+    else if (msg.event === 'pause')  line = 'paused the video at ' + t;
+    else if (msg.event === 'seek')   line = 'jumped to ' + t;
+    else if (msg.event === 'rate')   line = `changed speed to ${msg.playbackRate}x`;
+    if (line) addSystemMessage(line, userColor, { actor });
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
@@ -186,7 +211,30 @@ async function createPeer(tid, name) {
     pc.onicecandidate = ({ candidate }) => {
         if (candidate) chrome.runtime.sendMessage({ type: 'SIGNALING', targetId: tid, payload: { candidate } });
     };
-    pc.ontrack = (event) => { const s = event.streams[0]; if (s) addVideoTile(tid, s, name); };
+    pc.ontrack = (event) => {
+        const s = event.streams[0]; if (!s) return;
+        addVideoTile(tid, s, name);
+        const track = event.track;
+        if (track.kind !== 'video') return;
+        // Sender-side track.enabled = false → in modern Chrome the receiver's
+        // track fires `mute` after a brief no-frames period. Use that to flip
+        // the tile to its avatar instead of leaving a frozen last frame.
+        const showAvatar = () => {
+            const vEl = document.getElementById(`ss-v-${tid}`);
+            const av  = document.getElementById(`ss-av-${tid}`);
+            if (vEl) vEl.style.display = 'none';
+            if (av)  av.style.display = 'flex';
+        };
+        const showVideo = () => {
+            const vEl = document.getElementById(`ss-v-${tid}`);
+            const av  = document.getElementById(`ss-av-${tid}`);
+            if (vEl) vEl.style.display = 'block';
+            if (av)  av.style.display = 'none';
+        };
+        track.onmute   = showAvatar;
+        track.onunmute = showVideo;
+        track.onended  = showAvatar;
+    };
     pc.onnegotiationneeded = async () => {
         try {
             pObj.makingOffer = true;
@@ -772,6 +820,7 @@ function updateUnreadBadge() {
     b.style.display = unreadCount > 0 ? 'flex' : 'none';
 }
 
+let _ssRestoring = false;
 function addChatMessage(user, text, color) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
@@ -784,12 +833,64 @@ function addChatMessage(user, text, color) {
     m.appendChild(b); m.appendChild(s);
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
+    if (_ssRestoring) return;
     try {
         const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.push({ user, text, color });
+        history.push({ kind: 'msg', user, text, color });
         if (history.length > 200) history.shift();
         sessionStorage.setItem('ss-chat', JSON.stringify(history));
     } catch (_) {}
+}
+
+// System events appear in the chat history (Netflix Party style):
+//   "Selim started playing the video"
+//   "Ali jumped to 12:34"
+//   "Beni joined the party 🎉"
+// Distinct visual style — italic, dimmer, no avatar bubble — so they don't get
+// confused with user-typed chat messages.
+function addSystemMessage(text, color, opts) {
+    const msgs = document.getElementById('ss-msgs');
+    if (!msgs) return;
+    const o = opts || {};
+    const m = document.createElement('div');
+    m.style.cssText = 'font-size:11px;color:#888;font-style:italic;padding:4px 2px;animation:ss-fadein 0.2s ease;letter-spacing:0.01em;';
+    if (o.actor) {
+        const a = document.createElement('span');
+        a.style.cssText = `color:${color || '#6366f1'};font-weight:600;font-style:normal;`;
+        a.textContent = o.actor;
+        m.appendChild(a);
+        m.appendChild(document.createTextNode(' '));
+    }
+    m.appendChild(document.createTextNode(text));
+    msgs.appendChild(m);
+    msgs.scrollTop = msgs.scrollHeight;
+    if (_ssRestoring) return;
+    try {
+        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
+        history.push({ kind: 'sys', actor: o.actor || '', text, color });
+        if (history.length > 200) history.shift();
+        sessionStorage.setItem('ss-chat', JSON.stringify(history));
+    } catch (_) {}
+
+    // Bump unread + flash toggle when panel is closed (same as chat messages)
+    if (!isChatOpen) {
+        unreadCount++;
+        updateUnreadBadge();
+        const tog = document.getElementById('ss-panel-toggle');
+        if (tog) {
+            const orig = tog.style.background;
+            tog.style.background = 'rgba(99,102,241,0.4)';
+            setTimeout(() => { tog.style.background = orig || ''; }, 600);
+        }
+    }
+}
+
+// Format seconds to MM:SS (e.g. 67 → "01:07")
+function fmtTime(sec) {
+    if (typeof sec !== 'number' || isNaN(sec) || sec < 0) return '';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
 }
 
 // ─── EMOJI & TOAST ────────────────────────────────────────────────────────────
@@ -833,9 +934,8 @@ function updateParticipantPanel() {
     if (sub) {
         const userCount = (roomState.users || []).length;
         const roomId = roomState.roomId || '';
-        sub.textContent = roomId
-            ? `${roomId} · ${userCount} ${userCount === 1 ? 'kişi' : 'kişi'}`
-            : `${userCount} kişi`;
+        const label = userCount === 1 ? 'user' : 'users';
+        sub.textContent = roomId ? `${roomId} · ${userCount} ${label}` : `${userCount} ${label}`;
     }
 }
 
@@ -1018,11 +1118,15 @@ function injectUI() {
     msgs.style.cssText = 'flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px;min-height:0;';
     panel.appendChild(msgs);
 
-    // Restore chat history
+    // Restore chat history (regular messages and system events)
     try {
+        _ssRestoring = true;
         const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.forEach(m => addChatMessage(m.user, m.text, m.color));
-    } catch (_) {}
+        history.forEach(m => {
+            if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor });
+            else                  addChatMessage(m.user, m.text, m.color);
+        });
+    } catch (_) {} finally { _ssRestoring = false; }
 
     // Chat footer (input + emoji + send) with emoji popover
     const chatFooter = document.createElement('div');
@@ -1037,7 +1141,7 @@ function injectUI() {
 
     const chatInput = document.createElement('input');
     chatInput.id = 'ss-chat-in';
-    chatInput.placeholder = 'Mesaj yaz...';
+    chatInput.placeholder = 'Type a message...';
     chatInput.autocomplete = 'off';
     chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;min-width:0;';
     chatInput.onfocus = () => chatInput.style.borderColor = '#6366f1';
