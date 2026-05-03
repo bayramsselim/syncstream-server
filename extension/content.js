@@ -47,8 +47,9 @@ const ICE_SERVERS  = {
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
-function getAvatar(idOrName) {
-    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
+function getAvatar(idOrName, forcedAvatar) {
+    if (forcedAvatar) return forcedAvatar;
+    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
     const idStr = String(idOrName || 'anon');
     const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
     return avatars[idx];
@@ -150,7 +151,7 @@ chrome.runtime.onMessage.addListener((msg) => {
         }
     }
     else if (msg.type === 'SIGNALING')     enqueueSignaling(msg.fromId, msg.payload);
-    else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color);
+    else if (msg.type === 'CHAT_MESSAGE')  handleIncomingChat(msg.username, msg.text, msg.color, msg.avatar);
     else if (msg.type === 'REACTION')      animateEmoji(msg.emoji);
     else if (msg.type === 'TOAST') {
         // Server emits TOAST for membership/host events. Route those into the
@@ -259,8 +260,15 @@ function broadcastState(event = 'sync') {
     isInitialLoad = false;
 
     isSyncing = true;
-    setTimeout(() => { isSyncing = false; }, 400); 
+    setTimeout(() => { isSyncing = false; }, 1000); // Increased lock to prevent echo
 }
+
+// ─── HEARTBEAT ────────────────────────────────────────────────────────────────
+setInterval(() => {
+    if (roomState?.isHost && videoElement && !videoElement.paused) {
+        broadcastState('sync');
+    }
+}, 5000); // 5s heartbeat to correct drift
 
 function applyRemoteSync(msg) {
     if (!videoElement) videoElement = findMainVideo();
@@ -314,8 +322,8 @@ function applyRemoteSync(msg) {
         setTimeout(doApply, 3000);
     }
 
-    // Reduced lock duration for faster recovery
-    setTimeout(() => { isSyncing = false; }, 400); 
+    // 1s lock for remote syncs to ensure all triggered events (play, seek, etc) are ignored
+    setTimeout(() => { isSyncing = false; }, 1000); 
 
     // Add a system event line in chat (Netflix Party style)
     const actor = msg.byUsername || '';
@@ -572,7 +580,7 @@ function updateGalleryLayout() {
 }
 
 // ─── VIDEO TILES ──────────────────────────────────────────────────────────────
-function createTileShell(id, name, color) {
+function createTileShell(id, name, color, avatar) {
     const inner = document.getElementById('ss-grid-inner');
     if (!inner) return null;
 
@@ -592,11 +600,11 @@ function createTileShell(id, name, color) {
     av.id = `ss-av-${id}`;
     av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1c2e;z-index:1;';
     
-    const avatar = getAvatar(name || (id === 'local' ? (roomState?.myUsername || 'You') : 'Anon'));
+    const displayAvatar = getAvatar(name || (id === 'local' ? (roomState?.myUsername || 'You') : 'Anon'), avatar);
 
     const avCircle = document.createElement('div');
     avCircle.style.cssText = `font-size:48px;filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));`;
-    avCircle.textContent = avatar;
+    avCircle.textContent = displayAvatar;
     av.appendChild(avCircle);
     tile.appendChild(av);
 
@@ -715,12 +723,16 @@ function syncAvatarTiles(users) {
         if (u.id === roomState.myId) return;
         activeIds.add(u.id);
         if (!document.getElementById(`ss-vid-${u.id}`)) {
-            createTileShell(u.id, u.username, u.color);
+            createTileShell(u.id, u.username, u.color, u.avatar);
             updateGalleryLayout();
         } else {
             // Update name label with away/host status
             const lbl = document.querySelector(`#ss-vid-${u.id} .ss-name-lbl`);
             if (lbl) lbl.textContent = u.username + (u.isAway ? ' 😴' : '') + (u.isHost ? ' 👑' : '');
+            
+            // Update avatar if it changed
+            const avCircle = document.querySelector(`#ss-av-${u.id} > div`);
+            if (avCircle && u.avatar) avCircle.textContent = u.avatar;
         }
     });
 
@@ -933,12 +945,12 @@ function playNotifSound() {
 }
 
 // ─── CHAT ─────────────────────────────────────────────────────────────────────
-function handleIncomingChat(user, text, color) {
+function handleIncomingChat(user, text, color, avatar) {
     if (text && text.startsWith('gif:')) {
         const url = text.replace('gif:', '');
         addSystemMessage(`<img src="${url}" style="width:100%;border-radius:12px;margin-top:6px;box-shadow:0 8px 30px rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.1);display:block;">`, color, { actor: user, isHtml: true });
     } else {
-        addChatMessage(user, text, color);
+        addChatMessage(user, text, color, avatar);
     }
 
     if (!isChatOpen) {
@@ -962,19 +974,18 @@ function updateUnreadBadge() {
 }
 
 let _ssRestoring = false;
-function addChatMessage(user, text, color) {
+function addChatMessage(user, text, color, avatar) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
 
-    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
-    const avatar = getAvatar(user);
+    const displayAvatar = getAvatar(user, avatar);
 
     const m = document.createElement('div');
     m.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.25s ease;align-items:flex-start;';
     
     const av = document.createElement('div');
     av.style.cssText = `flex-shrink:0;width:28px;height:28px;background:rgba(255,255,255,0.05);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px;border:1px solid rgba(255,255,255,0.1);`;
-    av.textContent = avatar;
+    av.textContent = displayAvatar;
 
     const content = document.createElement('div');
     content.style.cssText = 'flex:1;min-width:0;';
@@ -995,7 +1006,7 @@ function addChatMessage(user, text, color) {
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
-    saveToPersistentHistory({ kind: 'msg', user, text, color });
+    saveToPersistentHistory({ kind: 'msg', user, text, color, avatar });
 }
 
 function saveToPersistentHistory(item) {

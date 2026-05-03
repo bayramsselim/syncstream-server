@@ -174,10 +174,9 @@ document.addEventListener('DOMContentLoaded', () => {
             const item = document.createElement('div');
             item.className = 'user-item';
             
-            // Fun Avatar Mapping (Matches content.js)
-            const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝'];
-            const avatarIdx = Math.abs(u.id.split('').reduce((a,b)=>a+b.charCodeAt(0),0)) % avatars.length;
-            const avatar = avatars[avatarIdx];
+            // Server-assigned Avatar (Fallback to calculation if missing)
+            const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
+            const avatar = u.avatar || avatars[Math.abs(u.id.split('').reduce((a,b)=>a+b.charCodeAt(0),0)) % avatars.length];
 
             const av = document.createElement('div');
             av.className   = 'user-av';

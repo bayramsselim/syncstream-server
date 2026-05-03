@@ -1,7 +1,7 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
-const VERSION = '6char-codes-v2';
+const VERSION = '6char-codes-v6-unique-avatars';
 
 const server = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/ping') {
@@ -17,8 +17,10 @@ const wss = new WebSocketServer({ server });
 const rooms = new Map();
 
 const MAX_ROOM_SIZE  = 10;
-const MAX_MSG_PER_S  = 20;   // rate limit: messages per second per connection
+const MAX_MSG_PER_S  = 30;   // Increased rate limit slightly
 const MAX_JOIN_TRIES = 8;    // brute-force: max failed join attempts per connection
+
+const AVATAR_POOL = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
 
 function randomId()    { return Math.random().toString(36).substring(2, 9); }
 function randomColor() { return `hsl(${Math.floor(Math.random() * 360)},70%,75%)`; }
@@ -36,6 +38,7 @@ wss.on('connection', (ws) => {
     ws.username    = null;
     ws.isInCall    = false;
     ws.isAway      = false;
+    ws.avatar      = '🐱';
     ws.msgCount    = 0;
     ws.joinTries   = 0;
 
@@ -56,11 +59,18 @@ wss.on('connection', (ws) => {
             const roomId    = randomRoomId();
             ws.roomId       = roomId;
             ws.username     = (data.username || 'Host').substring(0, 24);
+            ws.avatar       = AVATAR_POOL[0]; // First user gets first avatar
+            
             rooms.set(roomId, {
                 host:            ws.id,
                 clients:         new Set([ws]),
                 hostControlOnly: false,
-                nowPlaying:      'Waiting for video...'
+                nowPlaying:      'Waiting for video...',
+                nowPlayingUrl:   '',
+                currentTime:     0,
+                isPaused:        true,
+                playbackRate:    1,
+                lastUpdate:      Date.now()
             });
             broadcastRoomUpdate(roomId);
         }
@@ -84,6 +94,11 @@ wss.on('connection', (ws) => {
             }
             ws.roomId   = roomId;
             ws.username = (data.username || 'Guest').substring(0, 24);
+            
+            // Assign a unique avatar
+            const usedAvatars = Array.from(room.clients).map(c => c.avatar);
+            ws.avatar = AVATAR_POOL.find(a => !usedAvatars.includes(a)) || AVATAR_POOL[Math.floor(Math.random() * AVATAR_POOL.length)];
+            
             room.clients.add(ws);
             broadcastRoomUpdate(roomId);
             broadcastToRoom(roomId, { type: 'TOAST', message: `${ws.username} joined!`, color: ws.color }, null);
@@ -96,10 +111,17 @@ wss.on('connection', (ws) => {
 
         // ── Room-scoped messages ──────────────────────────────────────────────
         else if (ws.roomId && rooms.has(ws.roomId)) {
+            const room = rooms.get(ws.roomId);
 
             if (data.type === 'PLAYER_EVENT') {
-                const room = rooms.get(ws.roomId);
                 if (room.hostControlOnly && ws.id !== room.host) return;
+                
+                // Update room state
+                room.currentTime  = data.time || 0;
+                room.isPaused     = (data.event === 'pause');
+                room.playbackRate = data.playbackRate || 1;
+                room.lastUpdate   = Date.now();
+
                 broadcastToRoom(ws.roomId, {
                     type: 'SYNC_STATE', event: data.event,
                     time: data.time, playbackRate: data.playbackRate,
@@ -109,7 +131,7 @@ wss.on('connection', (ws) => {
 
             else if (data.type === 'CHAT_MESSAGE') {
                 const text = (data.text || '').substring(0, 500); // max message length
-                broadcastToRoom(ws.roomId, { type: 'CHAT_MESSAGE', username: ws.username, color: ws.color, text }, null);
+                broadcastToRoom(ws.roomId, { type: 'CHAT_MESSAGE', username: ws.username, color: ws.color, avatar: ws.avatar, text }, null);
             }
 
             else if (data.type === 'REACTION') {
@@ -117,7 +139,6 @@ wss.on('connection', (ws) => {
             }
 
             else if (data.type === 'SIGNALING') {
-                const room   = rooms.get(ws.roomId);
                 const target = Array.from(room.clients).find(c => c.id === data.targetId);
                 if (target?.readyState === 1) {
                     target.send(JSON.stringify({ type: 'SIGNALING', fromId: ws.id, fromUsername: ws.username, payload: data.payload }));
@@ -125,7 +146,6 @@ wss.on('connection', (ws) => {
             }
 
             else if (data.type === 'TOGGLE_HOST_CONTROL') {
-                const room = rooms.get(ws.roomId);
                 if (ws.id !== room.host) return;
                 room.hostControlOnly = !!data.value;
                 broadcastRoomUpdate(ws.roomId);
@@ -142,20 +162,19 @@ wss.on('connection', (ws) => {
             }
 
             else if (data.type === 'HOST_NAVIGATE') {
-                const room = rooms.get(ws.roomId);
                 if (room.hostControlOnly && ws.id !== room.host) return;
                 const url   = (data.url   || '').substring(0, 2000);
                 const title = (data.title || '').substring(0, 200);
                 
-                // Logic Fix: Persist navigation state so re-loaders get the right URL
                 room.nowPlaying = title;
                 room.nowPlayingUrl = url;
+                room.currentTime = 0; // Reset time on navigation
+                room.isPaused = true;
 
                 broadcastToRoom(ws.roomId, { type: 'HOST_NAVIGATE', url, title, username: ws.username }, ws);
             }
 
             else if (data.type === 'UPDATE_NOW_PLAYING') {
-                const room = rooms.get(ws.roomId);
                 if (!room || ws.id !== room.host) return;
 
                 const newTitle = (data.title || '').substring(0, 200);
@@ -167,7 +186,6 @@ wss.on('connection', (ws) => {
                 room.nowPlaying    = newTitle;
                 room.nowPlayingUrl = newUrl;
                 
-                // Logic Fix: Exclude host from broadcast to prevent redundant state updates
                 broadcastToRoom(ws.roomId, { type: 'NOW_PLAYING', title: room.nowPlaying, url: room.nowPlayingUrl }, ws);
             }
         }
@@ -194,13 +212,21 @@ function broadcastRoomUpdate(roomId) {
     const room = rooms.get(roomId);
     if (!room) return;
     const users = Array.from(room.clients).map(c => ({
-        id: c.id, username: c.username, color: c.color,
+        id: c.id, username: c.username, color: c.color, avatar: c.avatar,
         isHost: c.id === room.host, isInCall: c.isInCall || false, isAway: c.isAway || false
     }));
+    
+    // Calculate current time based on last update if playing
+    let accurateTime = room.currentTime;
+    if (!room.isPaused && room.lastUpdate) {
+        accurateTime += (Date.now() - room.lastUpdate) / 1000;
+    }
+
     broadcastToRoom(roomId, {
         type: 'ROOM_UPDATE', roomId,
         users, hostControlOnly: room.hostControlOnly,
-        nowPlaying: room.nowPlaying, nowPlayingUrl: room.nowPlayingUrl || ''
+        nowPlaying: room.nowPlaying, nowPlayingUrl: room.nowPlayingUrl || '',
+        currentTime: accurateTime, isPaused: room.isPaused, playbackRate: room.playbackRate
     }, null);
 }
 
