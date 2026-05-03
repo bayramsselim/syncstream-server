@@ -304,13 +304,7 @@ function makeDraggable(el, handle) {
         e.preventDefault();
         const r = el.getBoundingClientRect();
         el.style.left = r.left + 'px'; el.style.top = r.top + 'px';
-        el.style.bottom = 'auto'; el.style.right = 'auto';
-        /* For dock: keep its `translateX(var(--ss-dx))` transform intact and
-           just zero the variable. The hidden-state CSS uses the same var, so
-           hide/show animation stays purely vertical regardless of position.
-           Other draggables don't use the var and just clear transform. */
-        if (el.id === 'ss-dock') el.style.setProperty('--ss-dx', '0px');
-        else                     el.style.transform = 'none';
+        el.style.bottom = 'auto'; el.style.right = 'auto'; el.style.transform = 'none';
         ox = e.clientX; oy = e.clientY; startL = r.left; startT = r.top;
         handle.style.cursor = 'grabbing';
         const onMove = (e) => {
@@ -760,8 +754,14 @@ function handleIncomingChat(user, text, color) {
         unreadCount++;
         updateUnreadBadge();
         playNotifSound();
-        const btn = document.getElementById('ss-b-chat');
-        if (btn) { btn.style.background = '#f59e0b'; setTimeout(() => updateButtons(), 900); }
+        // Flash the panel toggle so user notices the new message even if panel
+        // is closed (replaces old dock chat-button flash).
+        const tog = document.getElementById('ss-panel-toggle');
+        if (tog) {
+            const orig = tog.style.background;
+            tog.style.background = 'rgba(245,158,11,0.85)';
+            setTimeout(() => { tog.style.background = orig || ''; }, 900);
+        }
     }
 }
 
@@ -819,32 +819,24 @@ function showToast(text, color) {
 function updateButtons() {
     const active = '#6366f1', idle = 'rgba(255,255,255,0.08)';
     const set = (id, on) => { const el = document.getElementById(id); if (el) el.style.background = on ? active : idle; };
-    set('ss-b-chat',   isChatOpen);
     set('ss-b-mic',    isMicOn);
     set('ss-b-cam',    isCamOn);
     set('ss-b-screen', isScreenSharing);
 }
 
 function updateParticipantPanel() {
-    const p = document.getElementById('ss-participants');
-    if (!p || !roomState?.users) return;
-    p.innerHTML = '';
-    const title = document.createElement('div');
-    title.style.cssText = 'font-size:11px;font-weight:700;color:#6366f1;margin-bottom:10px;letter-spacing:0.05em;';
-    title.textContent = `ONLINE (${roomState.users.length})`;
-    p.appendChild(title);
-    roomState.users.forEach(u => {
-        const row = document.createElement('div');
-        row.style.cssText = 'font-size:12px;margin-bottom:7px;display:flex;align-items:center;gap:8px;';
-        const av = document.createElement('div');
-        av.style.cssText = `width:26px;height:26px;border-radius:50%;background:${u.color||'#6366f1'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#111;flex-shrink:0;`;
-        av.textContent = u.username.charAt(0).toUpperCase();
-        const name = document.createElement('span');
-        name.style.cssText = 'color:#ddd;flex:1;';
-        name.textContent = u.username + (u.isHost ? ' 👑' : '') + (u.isInCall ? ' 🎤' : '') + (u.isAway ? ' 😴' : '');
-        row.appendChild(av); row.appendChild(name);
-        p.appendChild(row);
-    });
+    // Update the side panel header subtitle with room ID + user count.
+    // The old #ss-participants standalone panel is removed; participants are
+    // shown via the camera gallery (which contains avatar tiles for everyone).
+    if (!roomState) return;
+    const sub = document.getElementById('ss-panel-sub');
+    if (sub) {
+        const userCount = (roomState.users || []).length;
+        const roomId = roomState.roomId || '';
+        sub.textContent = roomId
+            ? `${roomId} · ${userCount} ${userCount === 1 ? 'kişi' : 'kişi'}`
+            : `${userCount} kişi`;
+    }
 }
 
 // ─── KEYBOARD SHORTCUTS ───────────────────────────────────────────────────────
@@ -857,12 +849,7 @@ document.addEventListener('keydown', (e) => {
         'm': () => { isMicOn = !isMicOn; updateMedia(); showToast(isMicOn ? '🎤 Mic ON' : '🎤 Mic OFF'); },
         'c': () => { isCamOn = !isCamOn; updateMedia(); showToast(isCamOn ? '📷 Camera ON' : '📷 Camera OFF'); },
         's': () => { toggleScreenShare(); showToast(isScreenSharing ? '🖥 Screen Share ON' : '🖥 Screen Share OFF'); },
-        't': () => {
-            isChatOpen = !isChatOpen;
-            const chat = document.getElementById('ss-chat');
-            if (chat) { chat.style.display = isChatOpen ? 'flex' : 'none'; if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); } }
-            updateButtons();
-        },
+        't': () => { if (window.__ssTogglePanel) window.__ssTogglePanel(); },
         'p': () => { const g = document.getElementById('ss-gallery'); if (g) { const h = !g.classList.contains('ss-user-hidden'); g.classList.toggle('ss-user-hidden', h); g.style.display = h ? 'none' : 'flex'; } }
     };
 
@@ -871,6 +858,13 @@ document.addEventListener('keydown', (e) => {
 }, true);
 
 // ─── UI INJECTION ─────────────────────────────────────────────────────────────
+// Side panel architecture (Netflix Party / Teleparty style):
+//   • Chat + room info + media controls live inside a slide-in panel on the right.
+//   • Toggle button is permanently pinned to the right edge with an unread badge.
+//   • Camera gallery (PARTICIPANTS) is a separate small floating widget, default
+//     top-LEFT (avoids common player UI in top-right).
+//   • Reactions live in a popover above the chat input (😀 button), no longer
+//     a row of always-visible buttons.
 function injectUI() {
     if (!IS_TOP_FRAME || document.getElementById('ss-root')) return;
 
@@ -885,131 +879,17 @@ function injectUI() {
     const style = document.createElement('style');
     style.textContent = `
         @keyframes ss-fadein { from { opacity:0;transform:translateY(4px); } to { opacity:1;transform:none; } }
-        #ss-dock { transition: opacity 0.35s ease, transform 0.35s ease; }
-        #ss-dock.ss-hidden { opacity:0 !important; transform:translateX(var(--ss-dx,-50%)) translateY(14px) !important; pointer-events:none !important; }
+        @keyframes ss-pop    { 0% { transform:scale(0.6);opacity:0; } 60% { transform:scale(1.08); } 100% { transform:scale(1);opacity:1; } }
         #ss-msgs::-webkit-scrollbar { width:3px; }
         #ss-msgs::-webkit-scrollbar-thumb { background:rgba(255,255,255,0.12); border-radius:4px; }
-        body:fullscreen iframe[data-ss-fs],
-        body:-webkit-full-screen iframe[data-ss-fs] {
-            position:fixed!important;inset:0!important;
-            width:100vw!important;height:100vh!important;
-            z-index:1!important;border:none!important;
-        }
+        #ss-panel { transition: transform 0.3s ease; }
+        #ss-panel.ss-open { transform: translateX(0) !important; }
+        #ss-panel-toggle { transition: right 0.3s ease, background 0.2s, transform 0.15s; }
+        #ss-panel-toggle:hover { background: rgba(99,102,241,0.4) !important; }
+        #ss-panel-toggle.ss-open { right: 320px !important; }
+        #ss-emoji-pop button:hover { background: rgba(255,255,255,0.15) !important; transform: scale(1.25); }
     `;
     document.head.appendChild(style);
-
-    // ── DOCK ─────────────────────────────────────────────────────────────────
-    const dock = document.createElement('div');
-    dock.id = 'ss-dock';
-    dock.style.cssText = 'position:absolute;bottom:24px;left:50%;transform:translateX(var(--ss-dx,-50%));padding:8px 14px;background:rgba(6,6,14,0.93);backdrop-filter:blur(24px);border-radius:32px;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;align-items:center;pointer-events:auto;border:1px solid rgba(255,255,255,0.08);box-shadow:0 8px 32px rgba(0,0,0,0.65);max-width:calc(100vw - 32px);';
-
-    const mkBtn = (emoji, id, handler, tip) => {
-        const b = document.createElement('button');
-        b.id = id; b.innerHTML = emoji; b.title = tip || '';
-        b.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:38px;height:38px;border-radius:50%;cursor:pointer;font-size:17px;display:flex;align-items:center;justify-content:center;transition:background 0.2s,transform 0.15s;position:relative;flex-shrink:0;';
-        b.onmouseenter = () => { b.style.transform='scale(1.12)'; b.style.background='rgba(255,255,255,0.18)'; };
-        b.onmouseleave = () => { b.style.transform='scale(1)'; updateButtons(); };
-        b.onclick = (e) => { e.stopPropagation(); handler(); };
-        return b;
-    };
-
-    // Chat btn + badge
-    const chatBtn = mkBtn('💬', 'ss-b-chat', () => {
-        isChatOpen = !isChatOpen;
-        chatPanel.style.display = isChatOpen ? 'flex' : 'none';
-        if (isChatOpen) { unreadCount = 0; updateUnreadBadge(); const i = document.getElementById('ss-chat-in'); if (i) i.focus(); }
-        updateButtons();
-    }, 'Chat (Alt+T)');
-    const badge = document.createElement('div');
-    badge.id = 'ss-chat-badge';
-    badge.style.cssText = 'position:absolute;top:-4px;right:-4px;background:#ef4444;color:#fff;font-size:9px;font-weight:700;width:16px;height:16px;border-radius:50%;display:none;align-items:center;justify-content:center;pointer-events:none;';
-    chatBtn.appendChild(badge);
-    dock.appendChild(chatBtn);
-
-    dock.appendChild(mkBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },          'Mic (Alt+M)'));
-    dock.appendChild(mkBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },          'Camera (Alt+C)'));
-    dock.appendChild(mkBtn('🖥',  'ss-b-screen', () => toggleScreenShare(),                             'Screen Share (Alt+S)'));
-    dock.appendChild(mkBtn('👥', 'ss-b-people', () => {
-        const g = document.getElementById('ss-gallery');
-        if (!g) return;
-        const hiding = !g.classList.contains('ss-user-hidden');
-        g.classList.toggle('ss-user-hidden', hiding);
-        g.style.display = hiding ? 'none' : 'flex';
-    }, 'Participants (Alt+P)'));
-
-    const sep = document.createElement('div');
-    sep.style.cssText = 'width:1px;height:20px;background:rgba(255,255,255,0.1);margin:0 2px;flex-shrink:0;';
-    dock.appendChild(sep);
-
-    const emojiLabels = { '❤️': 'Love ❤️', '😂': 'Haha 😂', '🔥': 'Fire! 🔥', '😮': 'Wow 😮', '👏': 'Clap 👏' };
-    ['❤️','😂','🔥','😮','👏'].forEach(em => {
-        dock.appendChild(mkBtn(em, '', () => chrome.runtime.sendMessage({ type: 'REACTION', emoji: em }), emojiLabels[em]));
-    });
-
-    // Now Playing label inside dock
-    const npLabel = document.createElement('div');
-    npLabel.style.cssText = 'margin-left:6px;padding-left:10px;border-left:1px solid rgba(255,255,255,0.1);max-width:160px;flex-shrink:1;overflow:hidden;';
-    npLabel.innerHTML = '<div style="font-size:9px;color:#555;letter-spacing:0.06em;text-transform:uppercase;">Now Playing</div>';
-    const npTitle = document.createElement('div');
-    npTitle.id = 'ss-np-title';
-    npTitle.style.cssText = 'font-size:11px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-    npTitle.textContent = '—';
-    npLabel.appendChild(npTitle);
-    dock.appendChild(npLabel);
-
-    root.appendChild(dock);
-    makeDraggable(dock);
-
-    // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
-    // content-main.js (MAIN world, document_start) intercepts requestFullscreen
-    // and redirects it to document.body — so ss-root (child of body) stays visible.
-    // This fallback handles the rare case where body isn't the fullscreen element.
-    function syncRootToFullscreen() {
-        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
-        if (!fsEl) {
-            if (root.parentElement !== document.body) document.body.appendChild(root);
-            return;
-        }
-        if (fsEl.contains(root)) return;
-        // IFRAME case: content-main.js handles this via body fullscreen + CSS.
-        // Don't try to append ss-root to the iframe DOM element — it won't render.
-        if (fsEl.tagName === 'IFRAME') return;
-        let target = fsEl;
-        while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
-        if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
-        target.style.overflow = 'visible';
-        target.appendChild(root);
-    }
-    document.addEventListener('fullscreenchange',       () => setTimeout(syncRootToFullscreen, 0));
-    document.addEventListener('webkitfullscreenchange', () => setTimeout(syncRootToFullscreen, 0));
-
-    // ── AWAY DETECTION ────────────────────────────────────────────────────────
-    const AWAY_MS = 3 * 60 * 1000;
-    const resetAway = () => {
-        clearTimeout(awayTimer);
-        if (isAway) {
-            isAway = false;
-            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: false }).catch(() => {});
-        }
-        awayTimer = setTimeout(() => {
-            isAway = true;
-            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: true }).catch(() => {});
-        }, AWAY_MS);
-    };
-    ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
-    resetAway();
-
-    // ── AUTO-HIDE ─────────────────────────────────────────────────────────────
-    let hideTimer;
-    const showDock = () => {
-        dock.classList.remove('ss-hidden');
-        clearTimeout(hideTimer);
-        hideTimer = setTimeout(() => { if (!dock.matches(':hover')) dock.classList.add('ss-hidden'); }, 3000);
-    };
-    document.addEventListener('mousemove', showDock, { passive: true });
-    dock.addEventListener('mouseenter', () => clearTimeout(hideTimer));
-    dock.addEventListener('mouseleave', () => { hideTimer = setTimeout(() => dock.classList.add('ss-hidden'), 3000); });
-    showDock();
 
     // ── SYNC INDICATOR ────────────────────────────────────────────────────────
     const syncInd = document.createElement('div');
@@ -1017,71 +897,10 @@ function injectUI() {
     syncInd.style.cssText = 'position:absolute;top:20px;left:50%;transform:translateX(-50%);background:rgba(99,102,241,0.95);color:#fff;padding:10px 24px;border-radius:24px;font-size:16px;font-weight:700;z-index:2147483645;pointer-events:none;opacity:0;transition:opacity 0.3s ease,transform 0.3s ease;letter-spacing:0.05em;box-shadow:0 4px 24px rgba(99,102,241,0.45);white-space:nowrap;';
     root.appendChild(syncInd);
 
-    // ── CHAT PANEL ────────────────────────────────────────────────────────────
-    const chatPanel = document.createElement('div');
-    chatPanel.id = 'ss-chat';
-    chatPanel.style.cssText = 'position:absolute;bottom:90px;right:24px;width:290px;height:360px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 12px 40px rgba(0,0,0,0.65);overflow:hidden;';
-    root.appendChild(chatPanel);
-    makeDraggable(chatPanel);
-
-    const chatHeader = document.createElement('div');
-    chatHeader.style.cssText = 'padding:12px 16px;border-bottom:1px solid rgba(255,255,255,0.07);color:#fff;font-size:12px;font-weight:700;letter-spacing:0.06em;display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;';
-    chatHeader.textContent = 'CHAT';
-    const closeChat = document.createElement('button');
-    closeChat.textContent = '✕';
-    closeChat.style.cssText = 'background:none;border:none;color:#555;cursor:pointer;font-size:13px;padding:0;transition:color 0.2s;';
-    closeChat.onmouseenter = () => closeChat.style.color = '#fff';
-    closeChat.onmouseleave = () => closeChat.style.color = '#555';
-    closeChat.onclick = () => { isChatOpen = false; chatPanel.style.display = 'none'; updateButtons(); };
-    chatHeader.appendChild(closeChat);
-    chatPanel.appendChild(chatHeader);
-
-    const msgs = document.createElement('div');
-    msgs.id = 'ss-msgs';
-    msgs.style.cssText = 'flex:1;overflow-y:auto;padding:10px 14px;display:flex;flex-direction:column;gap:2px;';
-    chatPanel.appendChild(msgs);
-
-    const chatFooter = document.createElement('div');
-    chatFooter.style.cssText = 'padding:10px 12px;display:flex;gap:8px;border-top:1px solid rgba(255,255,255,0.06);';
-    const chatInput = document.createElement('input');
-    chatInput.id = 'ss-chat-in';
-    chatInput.placeholder = 'Message...'; chatInput.autocomplete = 'off';
-    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;';
-    chatInput.onfocus = () => chatInput.style.borderColor = '#6366f1';
-    chatInput.onblur  = () => chatInput.style.borderColor = 'rgba(255,255,255,0.08)';
-    const sendBtn = document.createElement('button');
-    sendBtn.textContent = '↑';
-    sendBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.2s,transform 0.15s;';
-    sendBtn.onmouseenter = () => { sendBtn.style.background='#4f46e5'; sendBtn.style.transform='scale(1.08)'; };
-    sendBtn.onmouseleave = () => { sendBtn.style.background='#6366f1'; sendBtn.style.transform='scale(1)'; };
-    chatFooter.appendChild(chatInput); chatFooter.appendChild(sendBtn);
-    chatPanel.appendChild(chatFooter);
-
-    const sendMessage = () => {
-        const text = chatInput.value.trim();
-        if (text) { chrome.runtime.sendMessage({ type: 'CHAT_MESSAGE', text }); chatInput.value = ''; }
-    };
-    sendBtn.onclick = sendMessage;
-    chatInput.addEventListener('keydown',  e => e.stopPropagation());
-    chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
-
-    // Restore chat history from this session
-    try {
-        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
-        history.forEach(m => addChatMessage(m.user, m.text, m.color));
-    } catch (_) {}
-
-    // ── PARTICIPANTS PANEL ────────────────────────────────────────────────────
-    const pP = document.createElement('div');
-    pP.id = 'ss-participants';
-    pP.style.cssText = 'position:absolute;bottom:90px;left:24px;width:210px;background:rgba(6,6,14,0.97);border:1px solid rgba(255,255,255,0.09);border-radius:16px;padding:14px;display:none;color:#fff;pointer-events:auto;box-shadow:0 8px 30px rgba(0,0,0,0.55);';
-    root.appendChild(pP);
-    makeDraggable(pP);
-
-    // ── VIDEO GALLERY ─────────────────────────────────────────────────────────
+    // ── CAMERA GALLERY (default TOP-LEFT now, away from player UI) ────────────
     const gallery = document.createElement('div');
     gallery.id = 'ss-gallery';
-    gallery.style.cssText = 'position:absolute;top:20px;right:20px;background:rgba(6,6,14,0.92);border:1px solid rgba(255,255,255,0.1);border-radius:14px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);overflow:hidden;z-index:2147483640;transition:width 0.3s,height 0.3s;min-width:80px;';
+    gallery.style.cssText = 'position:absolute;top:20px;left:20px;background:rgba(6,6,14,0.92);border:1px solid rgba(255,255,255,0.1);border-radius:14px;display:none;flex-direction:column;pointer-events:auto;box-shadow:0 8px 32px rgba(0,0,0,0.6);overflow:hidden;z-index:2147483640;transition:width 0.3s,height 0.3s;min-width:80px;';
 
     const galleryHeader = document.createElement('div');
     galleryHeader.style.cssText = 'height:34px;padding:0 10px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.07);flex-shrink:0;cursor:grab;user-select:none;';
@@ -1144,11 +963,223 @@ function injectUI() {
     root.appendChild(gallery);
     makeDraggable(gallery, galleryHeader);
 
-    // ── KEYBOARD SHORTCUT TOOLTIP ─────────────────────────────────────────────
-    const kbHint = document.createElement('div');
-    kbHint.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);font-size:10px;color:rgba(255,255,255,0.2);pointer-events:none;white-space:nowrap;';
-    kbHint.textContent = 'Alt+M mic · Alt+C cam · Alt+S screen · Alt+T chat · Alt+P people';
-    root.appendChild(kbHint);
+    // ── SIDE PANEL ────────────────────────────────────────────────────────────
+    const panel = document.createElement('div');
+    panel.id = 'ss-panel';
+    panel.style.cssText = 'position:absolute;top:0;right:0;width:320px;height:100%;max-width:80vw;background:rgba(6,6,14,0.97);backdrop-filter:blur(24px);border-left:1px solid rgba(255,255,255,0.08);box-shadow:-8px 0 32px rgba(0,0,0,0.5);transform:translateX(100%);pointer-events:auto;display:flex;flex-direction:column;color:#fff;';
+    root.appendChild(panel);
+
+    // Header
+    const pHeader = document.createElement('div');
+    pHeader.style.cssText = 'padding:14px 16px;border-bottom:1px solid rgba(255,255,255,0.07);display:flex;justify-content:space-between;align-items:center;flex-shrink:0;';
+    const pHeaderLeft = document.createElement('div');
+    pHeaderLeft.style.cssText = 'display:flex;flex-direction:column;gap:2px;min-width:0;';
+    const pHeaderTitle = document.createElement('div');
+    pHeaderTitle.style.cssText = 'font-size:13px;font-weight:700;letter-spacing:0.04em;color:#fff;';
+    pHeaderTitle.textContent = 'SyncStream';
+    const pHeaderSub = document.createElement('div');
+    pHeaderSub.id = 'ss-panel-sub';
+    pHeaderSub.style.cssText = 'font-size:10px;color:#888;letter-spacing:0.04em;';
+    pHeaderSub.textContent = '';
+    pHeaderLeft.appendChild(pHeaderTitle);
+    pHeaderLeft.appendChild(pHeaderSub);
+    pHeader.appendChild(pHeaderLeft);
+
+    const pHeaderRight = document.createElement('div');
+    pHeaderRight.style.cssText = 'display:flex;gap:6px;flex-shrink:0;';
+    const leaveBtn = document.createElement('button');
+    leaveBtn.innerHTML = '🚪';
+    leaveBtn.title = 'Leave Room';
+    leaveBtn.style.cssText = 'background:rgba(239,68,68,0.15);border:none;color:#fff;width:30px;height:30px;border-radius:50%;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:background 0.15s;';
+    leaveBtn.onmouseenter = () => { leaveBtn.style.background = 'rgba(239,68,68,0.4)'; };
+    leaveBtn.onmouseleave = () => { leaveBtn.style.background = 'rgba(239,68,68,0.15)'; };
+    leaveBtn.onclick = () => { chrome.runtime.sendMessage({ type: 'LEAVE_ROOM' }); };
+    pHeaderRight.appendChild(leaveBtn);
+    pHeader.appendChild(pHeaderRight);
+    panel.appendChild(pHeader);
+
+    // Now Playing strip
+    const npRow = document.createElement('div');
+    npRow.style.cssText = 'padding:10px 16px;border-bottom:1px solid rgba(255,255,255,0.05);display:flex;flex-direction:column;gap:2px;flex-shrink:0;';
+    const npLabel = document.createElement('div');
+    npLabel.style.cssText = 'font-size:9px;color:#555;letter-spacing:0.06em;text-transform:uppercase;';
+    npLabel.textContent = 'Now Playing';
+    const npTitle = document.createElement('div');
+    npTitle.id = 'ss-np-title';
+    npTitle.style.cssText = 'font-size:12px;color:#aaa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+    npTitle.textContent = '—';
+    npRow.appendChild(npLabel);
+    npRow.appendChild(npTitle);
+    panel.appendChild(npRow);
+
+    // Chat scroll area
+    const msgs = document.createElement('div');
+    msgs.id = 'ss-msgs';
+    msgs.style.cssText = 'flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:2px;min-height:0;';
+    panel.appendChild(msgs);
+
+    // Restore chat history
+    try {
+        const history = JSON.parse(sessionStorage.getItem('ss-chat') || '[]');
+        history.forEach(m => addChatMessage(m.user, m.text, m.color));
+    } catch (_) {}
+
+    // Chat footer (input + emoji + send) with emoji popover
+    const chatFooter = document.createElement('div');
+    chatFooter.style.cssText = 'padding:10px 12px;display:flex;gap:6px;align-items:center;border-top:1px solid rgba(255,255,255,0.06);position:relative;flex-shrink:0;';
+
+    const emojiBtn = document.createElement('button');
+    emojiBtn.textContent = '😀';
+    emojiBtn.title = 'Reactions';
+    emojiBtn.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:16px;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.15s;';
+    emojiBtn.onmouseenter = () => { emojiBtn.style.background = 'rgba(255,255,255,0.18)'; };
+    emojiBtn.onmouseleave = () => { emojiBtn.style.background = 'rgba(255,255,255,0.08)'; };
+
+    const chatInput = document.createElement('input');
+    chatInput.id = 'ss-chat-in';
+    chatInput.placeholder = 'Mesaj yaz...';
+    chatInput.autocomplete = 'off';
+    chatInput.style.cssText = 'flex:1;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.08);color:#fff;padding:9px 12px;border-radius:20px;font-size:12px;outline:none;transition:border-color 0.2s;min-width:0;';
+    chatInput.onfocus = () => chatInput.style.borderColor = '#6366f1';
+    chatInput.onblur  = () => chatInput.style.borderColor = 'rgba(255,255,255,0.08)';
+
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = '↑';
+    sendBtn.title = 'Send';
+    sendBtn.style.cssText = 'background:#6366f1;color:#fff;border:none;width:34px;height:34px;border-radius:50%;cursor:pointer;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:background 0.15s,transform 0.15s;';
+    sendBtn.onmouseenter = () => { sendBtn.style.background='#4f46e5'; sendBtn.style.transform='scale(1.08)'; };
+    sendBtn.onmouseleave = () => { sendBtn.style.background='#6366f1'; sendBtn.style.transform='scale(1)'; };
+
+    chatFooter.appendChild(emojiBtn);
+    chatFooter.appendChild(chatInput);
+    chatFooter.appendChild(sendBtn);
+    panel.appendChild(chatFooter);
+
+    const sendMessage = () => {
+        const text = chatInput.value.trim();
+        if (text) { chrome.runtime.sendMessage({ type: 'CHAT_MESSAGE', text }); chatInput.value = ''; }
+    };
+    sendBtn.onclick = sendMessage;
+    chatInput.addEventListener('keydown',  e => e.stopPropagation());
+    chatInput.addEventListener('keypress', e => { e.stopPropagation(); if (e.key === 'Enter') sendMessage(); });
+
+    // Emoji popover (anchored above the emoji button)
+    const emojiPop = document.createElement('div');
+    emojiPop.id = 'ss-emoji-pop';
+    emojiPop.style.cssText = 'position:absolute;bottom:54px;left:8px;background:rgba(20,20,30,0.97);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:6px;display:none;gap:2px;z-index:5;box-shadow:0 4px 20px rgba(0,0,0,0.5);animation:ss-pop 0.18s ease;';
+    const emojiLabels = { '❤️': 'Love', '😂': 'Haha', '🔥': 'Fire', '😮': 'Wow', '👏': 'Clap' };
+    ['❤️','😂','🔥','😮','👏'].forEach(em => {
+        const eb = document.createElement('button');
+        eb.textContent = em;
+        eb.title = emojiLabels[em];
+        eb.style.cssText = 'background:none;border:none;font-size:18px;cursor:pointer;padding:6px 8px;border-radius:50%;transition:background 0.15s,transform 0.15s;';
+        eb.onclick = (e) => {
+            e.stopPropagation();
+            chrome.runtime.sendMessage({ type: 'REACTION', emoji: em });
+            emojiPop.style.display = 'none';
+        };
+        emojiPop.appendChild(eb);
+    });
+    chatFooter.appendChild(emojiPop);
+
+    emojiBtn.onclick = (e) => {
+        e.stopPropagation();
+        emojiPop.style.display = emojiPop.style.display === 'flex' ? 'none' : 'flex';
+    };
+    document.addEventListener('click', (e) => {
+        if (emojiPop.style.display === 'flex' && !emojiPop.contains(e.target) && e.target !== emojiBtn) {
+            emojiPop.style.display = 'none';
+        }
+    });
+
+    // Controls row (mic / cam / screen) at the bottom
+    const ctrlRow = document.createElement('div');
+    ctrlRow.style.cssText = 'padding:10px 14px 12px;display:flex;gap:10px;justify-content:center;border-top:1px solid rgba(255,255,255,0.06);flex-shrink:0;';
+
+    const mkCtrlBtn = (emoji, id, handler, tip) => {
+        const b = document.createElement('button');
+        b.id = id; b.innerHTML = emoji; b.title = tip || '';
+        b.style.cssText = 'background:rgba(255,255,255,0.08);border:none;color:#fff;width:42px;height:42px;border-radius:50%;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:background 0.15s,transform 0.15s;';
+        b.onmouseenter = () => { b.style.transform='scale(1.1)'; b.style.background='rgba(255,255,255,0.18)'; };
+        b.onmouseleave = () => { b.style.transform='scale(1)'; updateButtons(); };
+        b.onclick = (e) => { e.stopPropagation(); handler(); };
+        return b;
+    };
+    ctrlRow.appendChild(mkCtrlBtn('🎤', 'ss-b-mic',    () => { isMicOn = !isMicOn; updateMedia(); },  'Mic (Alt+M)'));
+    ctrlRow.appendChild(mkCtrlBtn('📷', 'ss-b-cam',    () => { isCamOn = !isCamOn; updateMedia(); },  'Camera (Alt+C)'));
+    ctrlRow.appendChild(mkCtrlBtn('🖥', 'ss-b-screen', () => toggleScreenShare(),                     'Screen (Alt+S)'));
+    panel.appendChild(ctrlRow);
+
+    // ── PANEL TOGGLE ─────────────────────────────────────────────────────────
+    const toggle = document.createElement('div');
+    toggle.id = 'ss-panel-toggle';
+    toggle.style.cssText = 'position:absolute;top:50%;right:0;transform:translateY(-50%);width:42px;height:60px;background:rgba(6,6,14,0.95);backdrop-filter:blur(20px);border:1px solid rgba(255,255,255,0.1);border-right:none;border-radius:12px 0 0 12px;cursor:pointer;display:flex;align-items:center;justify-content:center;pointer-events:auto;box-shadow:-4px 4px 16px rgba(0,0,0,0.5);z-index:2147483646;';
+    const toggleIcon = document.createElement('span');
+    toggleIcon.style.cssText = 'font-size:18px;line-height:1;';
+    toggleIcon.textContent = '💬';
+    toggle.appendChild(toggleIcon);
+
+    // Unread badge on toggle (replaces old ss-chat-badge in dock)
+    const badge = document.createElement('div');
+    badge.id = 'ss-chat-badge';
+    badge.style.cssText = 'position:absolute;top:5px;right:4px;background:#ef4444;color:#fff;font-size:9px;font-weight:700;min-width:16px;height:16px;border-radius:8px;display:none;align-items:center;justify-content:center;pointer-events:none;padding:0 4px;border:1px solid rgba(6,6,14,0.95);box-sizing:content-box;';
+    toggle.appendChild(badge);
+    root.appendChild(toggle);
+
+    // Open/close panel
+    const setPanelOpen = (open) => {
+        isChatOpen = open;
+        if (open) {
+            panel.classList.add('ss-open');
+            toggle.classList.add('ss-open');
+            toggleIcon.textContent = '✕';
+            unreadCount = 0;
+            updateUnreadBadge();
+            setTimeout(() => chatInput.focus(), 200);
+        } else {
+            panel.classList.remove('ss-open');
+            toggle.classList.remove('ss-open');
+            toggleIcon.textContent = '💬';
+        }
+    };
+    toggle.onclick = (e) => { e.stopPropagation(); setPanelOpen(!isChatOpen); };
+
+    // Expose so the keyboard shortcut handler can use the same toggle
+    window.__ssTogglePanel = () => setPanelOpen(!isChatOpen);
+
+    // ── FULLSCREEN SUPPORT ────────────────────────────────────────────────────
+    function syncRootToFullscreen() {
+        const fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+        if (!fsEl) {
+            if (root.parentElement !== document.body) document.body.appendChild(root);
+            return;
+        }
+        if (fsEl.contains(root)) return;
+        if (fsEl.tagName === 'IFRAME') return;
+        let target = fsEl;
+        while (target.tagName === 'VIDEO' && target.parentElement) target = target.parentElement;
+        if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+        target.style.overflow = 'visible';
+        target.appendChild(root);
+    }
+    document.addEventListener('fullscreenchange',       () => setTimeout(syncRootToFullscreen, 0));
+    document.addEventListener('webkitfullscreenchange', () => setTimeout(syncRootToFullscreen, 0));
+
+    // ── AWAY DETECTION ────────────────────────────────────────────────────────
+    const AWAY_MS = 3 * 60 * 1000;
+    const resetAway = () => {
+        clearTimeout(awayTimer);
+        if (isAway) {
+            isAway = false;
+            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: false }).catch(() => {});
+        }
+        awayTimer = setTimeout(() => {
+            isAway = true;
+            chrome.runtime.sendMessage({ type: 'USER_STATUS', away: true }).catch(() => {});
+        }, AWAY_MS);
+    };
+    ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
+    resetAway();
 }
 
 // ─── MAIN LOOP ─────────────────────────────────────────────────────────────────
