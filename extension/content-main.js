@@ -17,7 +17,7 @@
 (function () {
     if (window.__ssFS) return;
     window.__ssFS = true;
-    window.__ssFSVersion = 'ALLOW-FS-2026-05-04';
+    window.__ssFSVersion = 'DOCK-MOUSE-2026-05-04';
     console.log('[SS-FS] content-main.js loaded — version:', window.__ssFSVersion, 'frame:', window === window.top ? 'TOP' : 'IFRAME', location.origin);
 
     /* Track active state independently of content.js (which runs at document_idle
@@ -306,8 +306,16 @@
 
         /* Reply to iframes asking on init (avoids 1.5s broadcast race). */
         window.addEventListener('message', function (e) {
-            if (!e.data || e.data.type !== 'SS_ASK') return;
-            try { e.source.postMessage({ type: isActive() ? 'SS_ACTIVE' : 'SS_INACTIVE' }, '*'); } catch (_) {}
+            if (!e.data) return;
+            if (e.data.type === 'SS_ASK') {
+                try { e.source.postMessage({ type: isActive() ? 'SS_ACTIVE' : 'SS_INACTIVE' }, '*'); } catch (_) {}
+            } else if (e.data.type === 'SS_ACTIVITY') {
+                /* Iframe (in real fullscreen) is forwarding mousemove because the
+                   cross-origin event boundary blocks them from reaching us
+                   directly. Dispatch synthetic mousemove so dock auto-hide
+                   resets its idle timer and shows the dock. */
+                try { document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: 0, clientY: 0 })); } catch (_) {}
+            }
         });
         setInterval(broadcastActive, 1500);
         new MutationObserver(broadcastActive).observe(document.documentElement, {
@@ -347,6 +355,23 @@
             try { window.parent.postMessage({ type: 'SS_ASK' }, '*'); } catch (_) {}
         }
     });
+
+    /* Forward mouse activity to top frame while in fake-fs.
+       In real browser fullscreen of a cross-origin iframe (e.g. izlesene's
+       player), mousemove events don't cross the frame boundary, so the top
+       frame's dock auto-hide logic never sees activity and keeps the dock
+       hidden. Throttled to ~200ms so we don't flood postMessage. */
+    var lastActivity = 0;
+    function fwdActivity() {
+        if (!fsOn) return;
+        var now = Date.now();
+        if (now - lastActivity < 200) return;
+        lastActivity = now;
+        try { window.top.postMessage({ type: 'SS_ACTIVITY' }, '*'); } catch (_) {}
+    }
+    document.addEventListener('mousemove', fwdActivity, { passive: true, capture: true });
+    document.addEventListener('mousedown', fwdActivity, { passive: true, capture: true });
+    document.addEventListener('keydown',   fwdActivity, { passive: true, capture: true });
 
     window.addEventListener('message', function (e) {
         if (!e.data) return;
