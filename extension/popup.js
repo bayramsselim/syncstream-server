@@ -174,9 +174,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const item = document.createElement('div');
             item.className = 'user-item';
             
-            // Server-assigned Avatar (Fallback to calculation if missing)
-            const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
-            const avatar = u.avatar || avatars[Math.abs(u.id.split('').reduce((a,b)=>a+b.charCodeAt(0),0)) % avatars.length];
+            // Server-assigned Avatar (Strict Source of Truth)
+            const avatar = u.avatar || '👤';
 
             const isMe = u.id === room.myId || u.username === room.myUsername;
 
@@ -191,7 +190,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const name = document.createElement('span');
             name.textContent = (isMe ? 'You' : u.username)
-                + (isMe ? ` (${u.username})` : '')
+                + (isMe && u.username !== 'You' ? ` (${u.username})` : '')
                 + (u.isHost   ? ' 👑' : '')
                 + (u.isInCall ? ' 🎤' : '');
             item.appendChild(av);

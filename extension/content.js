@@ -50,8 +50,8 @@ const ICE_SERVERS  = {
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 function getAvatar(id, nameFallback) {
-    const actualId = id === 'local' ? roomState?.myId : id;
-    if (actualId && userAvatars[actualId]) return userAvatars[actualId];
+    if (!id || id === 'local') return roomState?.myAvatar || '🐱';
+    if (userAvatars[id]) return userAvatars[id];
     const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
     const idStr = String(id || nameFallback || 'anon');
     const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
@@ -222,9 +222,11 @@ function findMainVideo() {
 function broadcastState(event = 'sync') {
     if (!videoElement || isSyncing || !roomState) return;
 
-    if (roomState.hostControlOnly && !roomState.isHost) return;
+    // Democratic Control: If not host-only, participants can broadcast their actions
+    const isHost = roomState.isHost;
+    if (roomState.hostControlOnly && !isHost) return;
 
-    if (!roomState.isHost && roomState.nowPlayingUrl) {
+    if (!isHost && roomState.nowPlayingUrl) {
         try {
             const hostUrl = new URL(roomState.nowPlayingUrl);
             const myUrl   = new URL(window.location.href);
@@ -254,14 +256,16 @@ function broadcastState(event = 'sync') {
     }
 
     if (line && !isInitialLoad) {
+        // Show as "You" locally
         addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
     }
     
     if (event === 'play' || event === 'pause') wasPaused = (event === 'pause');
     isInitialLoad = false;
 
+    // Echo Lock: 600ms is standard to prevent local action -> server -> remote-apply -> broadcast loop
     isSyncing = true;
-    setTimeout(() => { isSyncing = false; }, 400); 
+    setTimeout(() => { isSyncing = false; }, 600); 
 }
 
 // ─── HEARTBEAT (INDUSTRY STANDARD: 3s) ────────────────────────────────────────
@@ -578,7 +582,7 @@ function createTileShell(id, name, color, avatar) {
     av.id = `ss-av-${id}`;
     av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1c2e;z-index:1;';
     
-    const displayAvatar = getAvatar(id, name);
+    const displayAvatar = avatar || getAvatar(id, name);
 
     const avCircle = document.createElement('div');
     avCircle.style.cssText = `font-size:48px;filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));`;
@@ -698,34 +702,28 @@ function syncAvatarTiles(users) {
 
     const activeIds = new Set();
     users.forEach(u => {
-        if (u.id === roomState.myId) return;
-        activeIds.add(u.id);
-        if (!document.getElementById(`ss-vid-${u.id}`)) {
-            createTileShell(u.id, u.username, u.color, u.avatar);
+        const isMe = (u.id === roomState.myId);
+        const tileId = isMe ? 'local' : u.id;
+        activeIds.add(tileId);
+
+        if (!document.getElementById(`ss-vid-${tileId}`)) {
+            createTileShell(tileId, u.username, u.color, u.avatar);
             updateGalleryLayout();
         } else {
             // Update name label with away/host status
-            const lbl = document.querySelector(`#ss-vid-${u.id} .ss-name-lbl`);
-            if (lbl) lbl.textContent = u.username + (u.isAway ? ' 😴' : '') + (u.isHost ? ' 👑' : '');
+            const lbl = document.querySelector(`#ss-vid-${tileId} .ss-name-lbl`);
+            if (lbl) {
+                let nameStr = isMe ? 'You' : u.username;
+                if (u.isAway) nameStr += ' 😴';
+                if (u.isHost) nameStr += ' 👑';
+                lbl.textContent = nameStr;
+            }
             
             // Update avatar if it changed
-            const avCircle = document.querySelector(`#ss-av-${u.id} > div`);
+            const avCircle = document.querySelector(`#ss-av-${tileId} > div`);
             if (avCircle && u.avatar) avCircle.textContent = u.avatar;
         }
     });
-
-    // Update gallery count title
-    const counter = document.getElementById('ss-gallery-count');
-    if (counter) {
-        const total = users.length;
-        counter.textContent = String(total);
-    }
-
-    // Update local tile avatar if it changed
-    if (roomState?.myId) {
-        const myAvCircle = document.querySelector(`#ss-av-local > div`);
-        if (myAvCircle && roomState.myAvatar) myAvCircle.textContent = roomState.myAvatar;
-    }
 
     // Remove tiles for users who left
     inner.querySelectorAll('[id^="ss-vid-"]').forEach(tile => {
@@ -735,6 +733,9 @@ function syncAvatarTiles(users) {
             setTimeout(() => { tile.remove(); updateGalleryLayout(); }, 280);
         }
     });
+
+    const counter = document.getElementById('ss-gallery-count');
+    if (counter) counter.textContent = String(users.length);
 }
 
 function removeVideoTile(id) {
