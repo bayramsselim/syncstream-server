@@ -228,9 +228,16 @@ function broadcastState(event) {
 
     const time = videoElement.currentTime;
     const rate = videoElement.playbackRate;
+    const paused = videoElement.paused;
 
     // Fire-and-forget to background — no await, no lock on the send itself
-    chrome.runtime.sendMessage({ type: 'PLAYER_EVENT', event, time, playbackRate: rate }).catch(() => {});
+    chrome.runtime.sendMessage({ 
+        type: 'PLAYER_EVENT', 
+        event, 
+        time, 
+        playbackRate: rate,
+        isPaused: paused
+    }).catch(() => {});
 
     // Visual feedback in chat (only for intentional manual actions)
     if (!isInitialLoad && event !== 'rate') {
@@ -253,9 +260,8 @@ function broadcastState(event) {
     isInitialLoad = false;
 
     // Short echo-lock: prevents our OWN events (triggered by applyRemoteSync) from looping back.
-    // 300ms is enough — the round-trip to server and back takes at least 50-200ms.
     isSyncing = true;
-    setTimeout(() => { isSyncing = false; }, 300);
+    setTimeout(() => { isSyncing = false; }, 500);
 }
 
 // ─── HEARTBEAT ───────────────────────────────────────────────────────────────
@@ -267,7 +273,8 @@ setInterval(() => {
         type: 'PLAYER_EVENT',
         event: 'sync',
         time: videoElement.currentTime,
-        playbackRate: videoElement.playbackRate
+        playbackRate: videoElement.playbackRate,
+        isPaused: videoElement.paused
     }).catch(() => {});
 }, 3000);
 

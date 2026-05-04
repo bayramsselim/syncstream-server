@@ -125,7 +125,7 @@ wss.on('connection', (ws) => {
                 
                 // Update room state
                 room.currentTime  = data.time || 0;
-                room.isPaused     = (data.event === 'pause');
+                room.isPaused     = !!data.isPaused;
                 room.playbackRate = data.playbackRate || 1;
                 room.lastUpdate   = Date.now();
 
