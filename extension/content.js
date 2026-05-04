@@ -265,9 +265,10 @@ function broadcastState(event) {
 }
 
 // ─── HEARTBEAT ───────────────────────────────────────────────────────────────
-// Host sends a 'sync' pulse every 2s (Teleparty frequency) so room stays aligned.
+// Host sends a 'sync' pulse every 3s so new joiners snap to current position.
+// CRITICAL: We send directly — NOT via broadcastState — to avoid touching isSyncing.
 setInterval(() => {
-    if (!roomState?.isHost || !videoElement || isSyncing) return;
+    if (!roomState?.isHost || !videoElement) return;
     chrome.runtime.sendMessage({
         type: 'PLAYER_EVENT',
         event: 'sync',
@@ -275,8 +276,7 @@ setInterval(() => {
         playbackRate: videoElement.playbackRate,
         isPaused: videoElement.paused
     }).catch(() => {});
-}, 2000);
-
+}, 3000);
 
 
 // ─── APPLY REMOTE SYNC ───────────────────────────────────────────────────────────────
@@ -327,33 +327,33 @@ function applyRemoteSync(msg) {
         videoElement.playbackRate = baseRate;
     }
     else if (msg.event === 'sync') {
-        // Teleparty Logic: Correct play/pause mismatch AND time drift even if paused
+        // 1. Correct play/pause mismatch first
         if (hostPaused && !myPaused) {
             videoElement.pause();
             videoElement.currentTime = targetTime;
         } else if (!hostPaused && myPaused) {
-            // Only play if we are not buffering
-            if (videoElement.readyState >= 3) {
+            videoElement.currentTime = targetTime;
+            videoElement.play().catch(() => {});
+            videoElement.playbackRate = baseRate;
+        } else if (!hostPaused) {
+            // Both playing — check drift
+            if (drift > 2) {
+                // Hard jump for large drift
                 videoElement.currentTime = targetTime;
-                videoElement.play().catch(() => {});
                 videoElement.playbackRate = baseRate;
-            }
-        } else {
-            // Both are in the same state (both playing or both paused)
-            // If drift is too large, we must sync even if paused (covers joiners/seeks while paused)
-            if (drift > (hostPaused ? 1.0 : 2.0)) {
-                videoElement.currentTime = targetTime;
-                if (!hostPaused) videoElement.playbackRate = baseRate;
-            } 
-            else if (!hostPaused && drift > 0.3) {
-                // Smooth catch-up: subtle speed change
+            } else if (drift > 0.3) {
+                // Smooth catch-up: subtle speed change, no jarring jump
                 const adj = videoElement.currentTime < targetTime ? 0.06 : -0.06;
                 videoElement.playbackRate = baseRate + adj;
                 showSyncInd('⚡ Syncing...', '#f59e0b', 1800);
+                // Restore speed once aligned
                 setTimeout(() => {
-                    if (videoElement && !videoElement.paused) videoElement.playbackRate = baseRate;
-                }, 2000);
+                    if (videoElement && !videoElement.paused) {
+                        videoElement.playbackRate = baseRate;
+                    }
+                }, 2500);
             } else {
+                // Perfect sync — just ensure rate is correct
                 videoElement.playbackRate = baseRate;
             }
         }
@@ -1811,44 +1811,10 @@ function mainLoop() {
                 if (existing) existing.remove();
             }
         } catch(_) {}
-    // State Guard: If we are far from room state and not currently syncing, force it.
-    // This catches cases where event listeners failed or were blocked.
-    if (roomState && !roomState.isHost && videoElement && !isSyncing) {
-        const hostPaused = !!roomState.isPaused;
-        const drift = Math.abs(videoElement.currentTime - roomState.currentTime);
-        if (drift > 3 || (hostPaused !== videoElement.paused)) {
-             console.log('[SyncStream] State Guard: Correcting major desync...');
-             applyRemoteSync({
-                 event: 'sync',
-                 time: roomState.currentTime,
-                 isPaused: hostPaused,
-                 playbackRate: roomState.playbackRate || 1,
-                 sentAt: roomState.lastUpdate
-             });
-        }
     }
 }
 
-// Industry Standard: Snap-sync on tab focus (counteracts background throttling)
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && roomState && !roomState.isHost) {
-        console.log('[SyncStream] Tab visible: forcing high-precision sync');
-        chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
-            if (res) {
-                roomState = res;
-                applyRemoteSync({
-                    event: 'sync',
-                    time: res.currentTime,
-                    isPaused: res.isPaused,
-                    playbackRate: res.playbackRate || 1,
-                    sentAt: res.lastUpdate
-                });
-            }
-        });
-    }
-});
-
-loopInterval = setInterval(mainLoop, 400); 
+loopInterval = setInterval(mainLoop, 400); // Increased frequency from 500ms to 400ms
 
 // Logic Fix: Graceful cleanup when navigating away
 window.addEventListener('beforeunload', () => {
