@@ -71,9 +71,10 @@ function connectWebSocket() {
                 currentRoom = {
                     ...data,
                     myUsername: currentRoom?.myUsername || me?.username,
-                    myId: me?.id || currentRoom?.myId,
-                    myAvatar: me?.avatar || currentRoom?.myAvatar,
-                    isHost: me?.isHost || false
+                    myId:       me?.id     || currentRoom?.myId,
+                    myAvatar:   me?.avatar || currentRoom?.myAvatar,
+                    myColor:    me?.color  || currentRoom?.myColor,
+                    isHost:     me?.isHost || false
                 };
                 chrome.storage.local.set({ roomData: currentRoom });
                 const roomMsg = { type: 'ROOM_STATE', data: currentRoom };

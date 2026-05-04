@@ -621,7 +621,10 @@ function createTileShell(id, name, color, avatar) {
     av.id = `ss-av-${id}`;
     av.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#1a1c2e;z-index:1;';
     
-    const displayAvatar = avatar || getAvatar(id, name);
+    // Always prefer server-assigned avatar; getAvatar reads from userAvatars map
+    const displayAvatar = (id === 'local')
+        ? (roomState?.myAvatar || getAvatar('local'))
+        : (avatar || getAvatar(id));
 
     const avCircle = document.createElement('div');
     avCircle.style.cssText = `font-size:48px;filter:drop-shadow(0 4px 12px rgba(0,0,0,0.5));`;
@@ -1002,8 +1005,8 @@ function addChatMessage(user, text, color, avatar, userId) {
     const msgs = document.getElementById('ss-msgs');
     if (!msgs) return;
 
-    // Logic Fix: Always use the centralized map for avatars to ensure consistency
-    const displayAvatar = avatar || getAvatar(userId, user);
+    // ALWAYS use server-assigned avatar from the registry. Never compute locally.
+    const displayAvatar = getAvatar(userId) || avatar || '👤';
 
     const m = document.createElement('div');
     m.style.cssText = 'display:flex;gap:10px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.04);animation:ss-fadein 0.25s ease;align-items:flex-start;';
@@ -1031,7 +1034,7 @@ function addChatMessage(user, text, color, avatar, userId) {
     msgs.appendChild(m);
     msgs.scrollTop = msgs.scrollHeight;
     if (_ssRestoring) return;
-    saveToPersistentHistory({ kind: 'msg', user, text, color, avatar });
+    saveToPersistentHistory({ kind: 'msg', user, text, color, avatar, userId });
 }
 
 function saveToPersistentHistory(item) {
@@ -1442,7 +1445,7 @@ function injectUI() {
             const history = res[key] || [];
             history.forEach(m => {
                 if (m.kind === 'sys') addSystemMessage(m.text, m.color, { actor: m.actor, isHtml: m.isHtml });
-                else                  addChatMessage(m.user, m.text, m.color, m.avatar);
+                else addChatMessage(m.user, m.text, m.color, m.avatar, m.userId);
             });
             _ssRestoring = false;
         });
@@ -1738,12 +1741,22 @@ function mainLoop() {
 
     const v = findMainVideo();
     if (v && v !== videoElement) {
+        // Clean up old listeners if switching video elements
+        if (videoElement && videoElement._ssAbort) {
+            videoElement._ssAbort.abort();
+        }
         videoElement = v;
         videoFound   = true;
-        v.onplay       = () => broadcastState('play');
-        v.onpause      = () => broadcastState('pause');
-        v.onseeked     = () => broadcastState('seek');
-        v.onratechange = () => broadcastState('rate');
+
+        // Use addEventListener (not onXxx) — YouTube may override onXxx properties
+        const ac = new AbortController();
+        v._ssAbort = ac;
+        const sig = { signal: ac.signal };
+        v.addEventListener('play',       () => broadcastState('play'),  sig);
+        v.addEventListener('pause',      () => broadcastState('pause'), sig);
+        v.addEventListener('seeked',     () => broadcastState('seek'),  sig);
+        v.addEventListener('ratechange', () => broadcastState('rate'),  sig);
+
         // Slow down now that we have the video
         clearInterval(loopInterval);
         loopInterval = setInterval(mainLoop, 2000);
