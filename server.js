@@ -132,10 +132,10 @@ wss.on('connection', (ws) => {
                 broadcastToRoom(ws.roomId, {
                     type: 'SYNC_STATE', event: data.event,
                     time: data.time, playbackRate: data.playbackRate,
-                    byUsername: ws.username,
+                    byUsername: ws.username, byId: ws.id,
                     isPaused: (data.event === 'pause'),
-                    sentAt: Date.now() // Latency Compensation
-                }, ws);
+                    sentAt: Date.now()
+                }, null); // Send to ALL including sender — client filters by byId
             }
 
             else if (data.type === 'CHAT_MESSAGE') {

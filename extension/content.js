@@ -49,13 +49,12 @@ const ICE_SERVERS  = {
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
-function getAvatar(id, nameFallback) {
-    if (!id || id === 'local') return roomState?.myAvatar || '🐱';
-    if (userAvatars[id]) return userAvatars[id];
-    const avatars = ['🐱', '🐶', '🦊', '🐨', '🐼', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🐔', '🐧', '🐦', '🦉', '🦄', '🐝', '🐙', '🐢', '🦖', '🦋', '🐘', '🦒', '🦓'];
-    const idStr = String(id || nameFallback || 'anon');
-    const idx = Math.abs(idStr.split('').reduce((a, b) => a + b.charCodeAt(0), 0)) % avatars.length;
-    return avatars[idx];
+// Single source of truth: server-assigned avatar from userAvatars map.
+// 'local' maps to our own myId. Fallback is client-side hash (for race conditions only).
+function getAvatar(id) {
+    const resolvedId = (!id || id === 'local') ? roomState?.myId : id;
+    if (resolvedId && userAvatars[resolvedId]) return userAvatars[resolvedId];
+    return roomState?.myAvatar || '🐱'; // last-resort: server avatar or default
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
@@ -90,11 +89,10 @@ chrome.runtime.sendMessage({ type: 'GET_ROOM_STATE' }, (res) => {
 });
 
 chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'SYNC_STATE') { 
-        // Logic Fix: Immediate host protection
-        if (roomState?.isHost) return;
-        applyRemoteSync(msg); 
-        return; 
+    if (msg.type === 'SYNC_STATE') {
+        // Sender filtering happens inside applyRemoteSync (byId === myId check)
+        applyRemoteSync(msg);
+        return;
     }
 
     // Keep data-ss-active in sync in ALL frames (needed by content-main.js intercept)
@@ -219,136 +217,154 @@ function findMainVideo() {
     return videos.sort((a, b) => b.offsetWidth - a.offsetWidth)[0];
 }
 
-function broadcastState(event = 'sync') {
-    if (!videoElement || isSyncing || !roomState) return;
+// ─── BROADCAST STATE ───────────────────────────────────────────────────────────────
+// Called by video element event listeners (onplay, onpause, onseeked, onratechange).
+// isSyncing prevents echo: when WE apply a remote command, the resulting video
+// events (play/pause/seeked) must NOT re-broadcast back to the room.
+function broadcastState(event) {
+    if (!videoElement || !roomState) return;
+    if (isSyncing) return; // This event was triggered by applyRemoteSync — skip
+    if (roomState.hostControlOnly && !roomState.isHost) return;
 
-    // Democratic Control: If not host-only, participants can broadcast their actions
-    const isHost = roomState.isHost;
-    if (roomState.hostControlOnly && !isHost) return;
-
-    if (!isHost && roomState.nowPlayingUrl) {
-        try {
-            const hostUrl = new URL(roomState.nowPlayingUrl);
-            const myUrl   = new URL(window.location.href);
-            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) return;
-        } catch(e) {}
-    }
-    
     const time = videoElement.currentTime;
     const rate = videoElement.playbackRate;
 
-    chrome.runtime.sendMessage({
-        type: 'PLAYER_EVENT', event,
-        time: time,
-        playbackRate: rate
-    }).catch(() => {});
+    // Fire-and-forget to background — no await, no lock on the send itself
+    chrome.runtime.sendMessage({ type: 'PLAYER_EVENT', event, time, playbackRate: rate }).catch(() => {});
 
-    let line = '';
-    const t = fmtTime(time);
-    if      (event === 'play')   line = wasPaused ? 'started playing' : 'resumed at ' + t;
-    else if (event === 'pause') {
-        if (Date.now() - lastSeekTime < 500) return;
-        line = 'paused at ' + t;
-    }
-    else if (event === 'seek') {
-        lastSeekTime = Date.now();
-        line = 'jumped to ' + t;
+    // Visual feedback in chat (only for intentional manual actions)
+    if (!isInitialLoad && event !== 'rate') {
+        let line = '';
+        const t = fmtTime(time);
+        if      (event === 'play')  line = wasPaused ? 'started playing' : 'resumed at ' + t;
+        else if (event === 'pause') {
+            // Skip if this pause is just a side-effect of a seek in progress
+            if (Date.now() - lastSeekTime < 600) return;
+            line = 'paused at ' + t;
+        }
+        else if (event === 'seek') {
+            lastSeekTime = Date.now();
+            line = 'jumped to ' + t;
+        }
+        if (line) addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
     }
 
-    if (line && !isInitialLoad) {
-        // Show as "You" locally
-        addSystemMessage(line, roomState?.myColor || '#6366f1', { actor: 'You' });
-    }
-    
     if (event === 'play' || event === 'pause') wasPaused = (event === 'pause');
     isInitialLoad = false;
 
-    // Echo Lock: 600ms is standard to prevent local action -> server -> remote-apply -> broadcast loop
+    // Short echo-lock: prevents our OWN events (triggered by applyRemoteSync) from looping back.
+    // 300ms is enough — the round-trip to server and back takes at least 50-200ms.
     isSyncing = true;
-    setTimeout(() => { isSyncing = false; }, 600); 
+    setTimeout(() => { isSyncing = false; }, 300);
 }
 
-// ─── HEARTBEAT (INDUSTRY STANDARD: 3s) ────────────────────────────────────────
+// ─── HEARTBEAT ───────────────────────────────────────────────────────────────
+// Host sends a 'sync' pulse every 3s so new joiners snap to current position.
+// CRITICAL: We send directly — NOT via broadcastState — to avoid touching isSyncing.
 setInterval(() => {
-    if (roomState?.isHost && videoElement && !videoElement.paused) {
-        broadcastState('sync');
-    }
-}, 3000); 
+    if (!roomState?.isHost || !videoElement) return;
+    chrome.runtime.sendMessage({
+        type: 'PLAYER_EVENT',
+        event: 'sync',
+        time: videoElement.currentTime,
+        playbackRate: videoElement.playbackRate
+    }).catch(() => {});
+}, 3000);
 
+
+// ─── APPLY REMOTE SYNC ───────────────────────────────────────────────────────────────
+// Receives SYNC_STATE from background.js (relayed from server).
+// Called for ALL participants including the sender's OWN actions if they came back
+// from the server — but isSyncing on the SENDER side prevents them from re-broadcasting.
 function applyRemoteSync(msg) {
     if (!videoElement) videoElement = findMainVideo();
-    if (!videoElement || !roomState || roomState.isHost) return;
+    if (!videoElement || !roomState) return;
+    // The sender (whoever triggered the event) should not re-apply it to themselves
+    if (msg.byId && msg.byId === roomState.myId) return;
 
-    if (roomState?.nowPlayingUrl) {
-        try {
-            const hostUrl = new URL(roomState.nowPlayingUrl);
-            const myUrl   = new URL(window.location.href);
-            if (hostUrl.origin !== myUrl.origin || hostUrl.pathname !== myUrl.pathname) return;
-        } catch(e) {}
-    }
-
-    // Latency Compensation — hostPaused must be declared BEFORE targetTime
-    const hostPaused = (msg.event === 'pause' || (msg.event === 'sync' && msg.isPaused));
-    const latency    = msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0;
-    const targetTime = msg.time + (hostPaused ? 0 : Math.min(latency, 2)); // cap latency at 2s
+    const hostPaused = (msg.event === 'pause' || (msg.event === 'sync' && !!msg.isPaused));
+    const latency    = (msg.sentAt && msg.sentAt > 0) ? Math.min((Date.now() - msg.sentAt) / 1000, 1.5) : 0;
+    const targetTime = hostPaused ? msg.time : msg.time + latency;
     const drift      = Math.abs(videoElement.currentTime - targetTime);
+    const myPaused   = videoElement.paused;
 
-    const doApply = () => {
-        isSyncing = true;
-        
-        // 1. Play/Pause Mismatch -> Instant Fix
-        if (msg.event === 'play' || (msg.event === 'sync' && !hostPaused && videoElement.paused)) {
-            videoElement.currentTime = targetTime;
-            videoElement.play().catch(() => {
-                setTimeout(() => videoElement.play().catch(() => {}), 500);
-            });
-        } 
-        else if (msg.event === 'pause' || (msg.event === 'sync' && hostPaused && !videoElement.paused)) {
+    // ─ Echo guard: set BEFORE touching the video so events triggered below are blocked ─
+    isSyncing = true;
+    setTimeout(() => { isSyncing = false; }, 500);
+
+    // ┌────────────────────────────────────────────────────────────
+    // Decision tree (Teleparty model):
+    // 1. play  → seek to target + play()
+    // 2. pause → pause() + seek to target
+    // 3. seek  → hard jump (always, no threshold)
+    // 4. sync  → correct play/pause state, then:
+    //           drift > 2s → hard jump
+    //           drift 0.3-2s → subtle speed adjustment (±5% playbackRate)
+    //           drift < 0.3s → perfect, no action
+    // └────────────────────────────────────────────────────────────
+
+    const baseRate = msg.playbackRate || 1;
+
+    if (msg.event === 'play') {
+        videoElement.currentTime = targetTime;
+        videoElement.playbackRate = baseRate;
+        videoElement.play().catch(() => setTimeout(() => videoElement.play().catch(() => {}), 300));
+    }
+    else if (msg.event === 'pause') {
+        videoElement.pause();
+        videoElement.currentTime = targetTime;
+    }
+    else if (msg.event === 'seek') {
+        // Always apply seek immediately, regardless of paused state
+        videoElement.currentTime = targetTime;
+        videoElement.playbackRate = baseRate;
+    }
+    else if (msg.event === 'sync') {
+        // 1. Correct play/pause mismatch first
+        if (hostPaused && !myPaused) {
             videoElement.pause();
             videoElement.currentTime = targetTime;
-        }
-        // 2. Large Drift (> 1.5s) or Manual Seek -> Hard Jump
-        else if (msg.event === 'seek' || drift > 1.5) {
+        } else if (!hostPaused && myPaused) {
             videoElement.currentTime = targetTime;
-            videoElement.playbackRate = msg.playbackRate || 1;
+            videoElement.play().catch(() => {});
+            videoElement.playbackRate = baseRate;
+        } else if (!hostPaused) {
+            // Both playing — check drift
+            if (drift > 2) {
+                // Hard jump for large drift
+                videoElement.currentTime = targetTime;
+                videoElement.playbackRate = baseRate;
+            } else if (drift > 0.3) {
+                // Smooth catch-up: subtle speed change, no jarring jump
+                const adj = videoElement.currentTime < targetTime ? 0.06 : -0.06;
+                videoElement.playbackRate = baseRate + adj;
+                showSyncInd('⚡ Syncing...', '#f59e0b', 1800);
+                // Restore speed once aligned
+                setTimeout(() => {
+                    if (videoElement && !videoElement.paused) {
+                        videoElement.playbackRate = baseRate;
+                    }
+                }, 2500);
+            } else {
+                // Perfect sync — just ensure rate is correct
+                videoElement.playbackRate = baseRate;
+            }
         }
-        // 3. Minor Drift (0.2s - 1.5s) -> Smooth Catch-up (Premium Feature)
-        else if (drift > 0.2) {
-            const baseRate = msg.playbackRate || 1;
-            const adjustment = (videoElement.currentTime < targetTime) ? 0.05 : -0.05;
-            videoElement.playbackRate = baseRate + adjustment;
-            
-            showSyncInd('⚡ Catching up...', '#f59e0b', 1500);
-
-            setTimeout(() => {
-                if (Math.abs(videoElement.currentTime - targetTime) < 0.1) {
-                    videoElement.playbackRate = baseRate;
-                }
-            }, 2000);
-        }
-        // 4. Perfect Sync -> Just ensure playback rate is correct
-        else {
-            videoElement.playbackRate = msg.playbackRate || 1;
-        }
-
-        setTimeout(() => { isSyncing = false; }, 600);
-    };
-
-    if (videoElement.readyState >= 2) doApply();
-    else {
-        videoElement.addEventListener('loadedmetadata', doApply, { once: true });
-        videoElement.addEventListener('canplay', doApply, { once: true });
     }
 
+    // ─ Chat activity line (only for intentional events, not heartbeat syncs) ─
     if (msg.event !== 'sync' && !isInitialLoad) {
-        const actor = msg.byUsername || 'Host';
-        let line = '';
+        const actor = msg.byUsername || 'Someone';
+        const userColor = userColors[msg.byId] || msg.color || '#6366f1';
         const t = fmtTime(msg.time);
-        if      (msg.event === 'play')   line = 'started playing';
-        else if (msg.event === 'pause')  line = 'paused at ' + t;
-        else if (msg.event === 'seek')   line = 'jumped to ' + t;
-        if (line) addSystemMessage(line, msg.color || '#6366f1', { actor });
+        let line = '';
+        if      (msg.event === 'play')  line = 'started playing';
+        else if (msg.event === 'pause') line = 'paused at ' + t;
+        else if (msg.event === 'seek')  line = 'jumped to ' + t;
+        if (line) addSystemMessage(line, userColor, { actor });
     }
+
+    isInitialLoad = false;
 }
 
 // ─── WEBRTC ───────────────────────────────────────────────────────────────────
