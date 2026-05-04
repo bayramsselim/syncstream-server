@@ -287,27 +287,50 @@ function applyRemoteSync(msg) {
         } catch(e) {}
     }
 
-    const drift = Math.abs(videoElement.currentTime - msg.time);
-    const hostPaused = (msg.event === 'pause' || (msg.event === 'sync' && msg.isPaused));
+    // Latency Compensation
+    const latency = msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0;
+    const targetTime = msg.time + (hostPaused ? 0 : latency);
+    
+    const drift = Math.abs(videoElement.currentTime - targetTime);
 
     const doApply = () => {
         isSyncing = true;
         
+        // 1. Play/Pause Mismatch -> Instant Fix
         if (msg.event === 'play' || (msg.event === 'sync' && !hostPaused && videoElement.paused)) {
-            videoElement.currentTime = msg.time;
+            videoElement.currentTime = targetTime;
             videoElement.play().catch(() => {
                 setTimeout(() => videoElement.play().catch(() => {}), 500);
             });
         } 
         else if (msg.event === 'pause' || (msg.event === 'sync' && hostPaused && !videoElement.paused)) {
             videoElement.pause();
-            videoElement.currentTime = msg.time;
+            videoElement.currentTime = targetTime;
         }
+        // 2. Large Drift (> 1.5s) or Manual Seek -> Hard Jump
         else if (msg.event === 'seek' || drift > 1.5) {
-            videoElement.currentTime = msg.time;
+            videoElement.currentTime = targetTime;
+            videoElement.playbackRate = msg.playbackRate || 1;
+        }
+        // 3. Minor Drift (0.2s - 1.5s) -> Smooth Catch-up (Premium Feature)
+        else if (drift > 0.2) {
+            const baseRate = msg.playbackRate || 1;
+            const adjustment = (videoElement.currentTime < targetTime) ? 0.05 : -0.05;
+            videoElement.playbackRate = baseRate + adjustment;
+            
+            showSyncInd('⚡ Catching up...', '#f59e0b', 1500);
+
+            setTimeout(() => {
+                if (Math.abs(videoElement.currentTime - targetTime) < 0.1) {
+                    videoElement.playbackRate = baseRate;
+                }
+            }, 2000);
+        }
+        // 4. Perfect Sync -> Just ensure playback rate is correct
+        else {
+            videoElement.playbackRate = msg.playbackRate || 1;
         }
 
-        if (msg.playbackRate) videoElement.playbackRate = msg.playbackRate;
         setTimeout(() => { isSyncing = false; }, 600);
     };
 
@@ -1065,6 +1088,20 @@ function animateEmoji(emoji) {
     setTimeout(() => e.remove(), 2000);
 }
 
+function showSyncInd(text, color, ms = 2000) {
+    const ind = document.getElementById('ss-sync-ind');
+    if (!ind) return;
+    ind.textContent = text;
+    ind.style.background = color || 'rgba(99,102,241,0.95)';
+    ind.style.opacity = '1';
+    ind.style.transform = 'translateX(-50%) translateY(0)';
+    clearTimeout(ind._timer);
+    ind._timer = setTimeout(() => {
+        ind.style.opacity = '0';
+        ind.style.transform = 'translateX(-50%) translateY(-20px)';
+    }, ms);
+}
+
 function showToast(text, color) {
     const t = document.createElement('div');
     t.textContent = text;
@@ -1646,15 +1683,16 @@ function injectUI() {
                     updateParticipantPanel();
                     syncAvatarTiles(res.users || []);
                     
-                    // Logic Fix: Persistent Media Recovery
-                    chrome.storage.local.get(['isCamOn', 'isMicOn'], (data) => {
-                        if (data.isCamOn || data.isMicOn) {
-                            isCamOn = !!data.isCamOn;
-                            isMicOn = !!data.isMicOn;
-                            console.log('[SyncStream] Auto-recovering media...', { isCamOn, isMicOn });
-                            updateMedia();
-                        }
-                    });
+                    // Logic Fix: Aggressive Hard-Sync on Visibility
+                    if (!roomState.isHost && roomState.currentTime !== undefined) {
+                        applyRemoteSync({
+                            event: 'sync',
+                            time: roomState.currentTime,
+                            playbackRate: roomState.playbackRate || 1,
+                            isPaused: roomState.isPaused,
+                            sentAt: Date.now()
+                        });
+                    }
                 }
             });
         }

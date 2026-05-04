@@ -140,7 +140,9 @@ wss.on('connection', (ws) => {
                 broadcastToRoom(ws.roomId, {
                     type: 'SYNC_STATE', event: data.event,
                     time: data.time, playbackRate: data.playbackRate,
-                    byUsername: ws.username
+                    byUsername: ws.username,
+                    isPaused: (data.event === 'pause'),
+                    sentAt: Date.now() // Latency Compensation
                 }, ws);
             }
 
@@ -248,7 +250,8 @@ function broadcastRoomUpdate(roomId) {
         type: 'ROOM_UPDATE', roomId,
         users, hostControlOnly: room.hostControlOnly,
         nowPlaying: room.nowPlaying, nowPlayingUrl: room.nowPlayingUrl || '',
-        currentTime: accurateTime, isPaused: room.isPaused, playbackRate: room.playbackRate
+        currentTime: accurateTime, isPaused: room.isPaused, playbackRate: room.playbackRate,
+        sentAt: Date.now() // Latency Compensation
     }, null);
 }
 
