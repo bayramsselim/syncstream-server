@@ -15,19 +15,25 @@ chrome.storage.local.get(['roomData'], (result) => {
 });
 
 // ─── KEEP-ALIVE ───────────────────────────────────────────────────────────────
+// Chrome alarms fire every minute to keep the service worker alive.
+// Additionally we send a WS ping every 25s to prevent Render free-tier sleep.
 chrome.alarms.create('keepAlive', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'keepAlive') {
-        // Ping server health endpoint
-        fetch('https://syncstream-server.onrender.com/health').catch(() => {});
-        
-        // Reconnect if socket died
         if (!socket || socket.readyState === WebSocket.CLOSED) {
-            console.log('[SyncStream] Alarm: Socket closed, reconnecting...');
             connectWebSocket();
+        } else if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'HEARTBEAT' }));
         }
     }
 });
+
+// WS-level ping every 25s (shorter than Render's 30s idle timeout)
+setInterval(() => {
+    if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'HEARTBEAT' }));
+    }
+}, 25000);
 
 // ─── WEBSOCKET ────────────────────────────────────────────────────────────────
 function connectWebSocket() {

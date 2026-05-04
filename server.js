@@ -59,7 +59,9 @@ wss.on('connection', (ws) => {
             const roomId    = randomRoomId();
             ws.roomId       = roomId;
             ws.username     = (data.username || 'Host').substring(0, 24);
-            ws.avatar       = AVATAR_POOL[0]; // First user gets first avatar
+            // Deterministic avatar from username hash
+            const hostHash  = (data.username || '').split('').reduce((a, b) => a + b.charCodeAt(0), 0);
+            ws.avatar       = AVATAR_POOL[Math.abs(hostHash) % AVATAR_POOL.length];
             
             rooms.set(roomId, {
                 host:            ws.id,
@@ -94,23 +96,13 @@ wss.on('connection', (ws) => {
             }
             ws.roomId   = roomId;
             ws.username = (data.username || 'Guest').substring(0, 24);
-            
-            // Assign a unique avatar
+
+            // Deterministic avatar: hash username → preferred slot, fallback to next free
+            const hash       = (data.username || '').split('').reduce((a, b) => a + b.charCodeAt(0), 0);
             const usedAvatars = Array.from(room.clients).map(c => c.avatar);
-            // Deterministic Unique Avatar Assignment
-            const hash = (data.username || '').split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-            const poolIdx = Math.abs(hash) % AVATAR_POOL.length;
-            
-            // Start with preferred, then find next available
-            let selected = AVATAR_POOL[poolIdx];
-            const usedAvatars = Array.from(room.clients.values()).map(c => c.avatar);
+            let selected     = AVATAR_POOL[Math.abs(hash) % AVATAR_POOL.length];
             if (usedAvatars.includes(selected)) {
-                for (const a of AVATAR_POOL) {
-                    if (!usedAvatars.includes(a)) {
-                        selected = a;
-                        break;
-                    }
-                }
+                selected = AVATAR_POOL.find(a => !usedAvatars.includes(a)) || AVATAR_POOL[0];
             }
             ws.avatar = selected;
             

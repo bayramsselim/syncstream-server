@@ -287,11 +287,11 @@ function applyRemoteSync(msg) {
         } catch(e) {}
     }
 
-    // Latency Compensation
-    const latency = msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0;
-    const targetTime = msg.time + (hostPaused ? 0 : latency);
-    
-    const drift = Math.abs(videoElement.currentTime - targetTime);
+    // Latency Compensation — hostPaused must be declared BEFORE targetTime
+    const hostPaused = (msg.event === 'pause' || (msg.event === 'sync' && msg.isPaused));
+    const latency    = msg.sentAt ? (Date.now() - msg.sentAt) / 1000 : 0;
+    const targetTime = msg.time + (hostPaused ? 0 : Math.min(latency, 2)); // cap latency at 2s
+    const drift      = Math.abs(videoElement.currentTime - targetTime);
 
     const doApply = () => {
         isSyncing = true;
@@ -1662,9 +1662,6 @@ function injectUI() {
     ['mousemove','keydown','click','touchstart'].forEach(ev => document.addEventListener(ev, resetAway, { passive: true }));
     resetAway();
 
-    setInterval(() => {
-        if (roomState?.roomId) chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
-    }, 30000);
 
     // Initial Media Recovery: Check if we were in a call before page load
     if (roomState?.users) {
